@@ -1,0 +1,22 @@
+[project]
+name = "hl-trading"
+version = "0.1.0"
+description = "Hyperliquid perps framework: L2 books, execution, Postgres/ClickHouse/Redis, replay, Docker observability"
+requires-python = ">=3.11"
+dependencies = [
+    "clickhouse-connect>=0.15.1",
+    "hyperliquid-python-sdk>=0.22.0",
+    "orjson>=3.11.8",
+    "prometheus-client>=0.24.1",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.13.1",
+    "redis>=7.4.0",
+]
+
+[project.scripts]
+hl-trade = "hl_trading.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.3,<0.10.0"]
+build-backend = "uv_build"

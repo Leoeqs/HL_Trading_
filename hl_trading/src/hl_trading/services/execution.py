@@ -1,0 +1,81 @@
+"""Order placement — risk gate, optional dry-run, journal, metrics."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from hyperliquid.exchange import Exchange
+from hyperliquid.utils.signing import OrderType
+from hyperliquid.utils.types import Cloid
+
+from hl_trading.config import Settings
+from hl_trading.domain import LimitOrderIntent, PortfolioView
+from hl_trading.metrics import ORDERS_SUBMITTED
+from hl_trading.services.risk import NotionalLimitRisk, RiskGate
+from hl_trading.storage.postgres_journal import OrderJournal
+
+logger = logging.getLogger(__name__)
+
+
+def _intent_to_order_type(intent: LimitOrderIntent) -> OrderType:
+    return {"limit": {"tif": intent.tif}}
+
+
+class ExecutionService:
+    def __init__(
+        self,
+        exchange: Exchange,
+        settings: Settings,
+        risk: RiskGate | None = None,
+        order_journal: OrderJournal | None = None,
+    ) -> None:
+        self._exchange = exchange
+        self._settings = settings
+        self._risk = risk or NotionalLimitRisk(settings)
+        self._journal = order_journal
+
+    def place_limit(
+        self,
+        portfolio: PortfolioView,
+        intent: LimitOrderIntent,
+        *,
+        mid_px: float | None = None,
+    ) -> dict[str, Any] | None:
+        self._risk.check_new_order(portfolio, intent, mid_px)
+        cloid: Cloid | None = None
+        if intent.client_order_id_hex:
+            cloid = Cloid.from_str(intent.client_order_id_hex)
+        response: dict[str, Any] | None = None
+        if self._settings.dry_run:
+            logger.info(
+                "[dry_run] would place %s %s %s @ %s ro=%s",
+                intent.side,
+                intent.size,
+                intent.coin,
+                intent.limit_px,
+                intent.reduce_only,
+            )
+        else:
+            is_buy = intent.side == "buy"
+            response = self._exchange.order(
+                intent.coin,
+                is_buy,
+                intent.size,
+                intent.limit_px,
+                _intent_to_order_type(intent),
+                intent.reduce_only,
+                cloid,
+            )
+        if self._journal:
+            self._journal.enqueue_order_record(
+                intent,
+                portfolio,
+                response,
+                dry_run=self._settings.dry_run,
+            )
+        if ORDERS_SUBMITTED is not None:
+            ORDERS_SUBMITTED.labels(dry_run=str(self._settings.dry_run).lower()).inc()
+        if self._settings.dry_run:
+            return None
+        return response

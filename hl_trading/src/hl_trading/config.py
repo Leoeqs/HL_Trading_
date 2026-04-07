@@ -1,0 +1,70 @@
+"""Application settings — environment variables (see `.env.example`)."""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    hl_network: Literal["mainnet", "testnet"] = "testnet"
+    account_address: str = Field(
+        ...,
+        description="Main wallet address (0x...) for user_state and WS user channels",
+    )
+    api_wallet_private_key: SecretStr = Field(
+        ...,
+        description="Private key for signing (API agent or main wallet)",
+    )
+
+    watch_coins: str = Field(
+        default="BTC",
+        description="Comma-separated perp symbols, e.g. BTC,ETH",
+    )
+    dry_run: bool = True
+
+    subscribe_l2: bool = Field(default=True, description="Subscribe to l2Book and maintain local L2")
+    subscribe_bbo: bool = Field(default=False, description="Also subscribe to bbo (extra bandwidth)")
+
+    max_position_usd_per_coin: float | None = Field(default=None)
+    max_order_notional_usd: float | None = Field(default=None)
+
+    metrics_port: int | None = Field(default=None, description="If set, expose Prometheus metrics on this port")
+
+    postgres_dsn: str | None = Field(default=None, description="postgresql://… for orders / reconcile")
+
+    clickhouse_host: str | None = Field(default=None)
+    clickhouse_port: int = 8123
+    clickhouse_user: str = "default"
+    clickhouse_password: SecretStr | None = None
+    clickhouse_database: str = "hl"
+
+    redis_url: str | None = Field(default=None)
+    redis_publish_l2: bool = Field(default=False, description="Mirror L2 JSON snapshot to Redis keys hl:l2book:{COIN}")
+
+    l2_local_ndjson_path: str | None = Field(
+        default=None,
+        description="If set, append one JSON line per l2 message for offline replay (hot path: buffered write)",
+    )
+
+    def watch_coin_list(self) -> list[str]:
+        parts = [x.strip() for x in self.watch_coins.split(",") if x.strip()]
+        return parts or ["BTC"]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+def clear_settings_cache() -> None:
+    get_settings.cache_clear()
