@@ -10,6 +10,7 @@ from pathlib import Path
 
 from hl_trading.adapters.hyperliquid_factory import create_info_rest_only
 from hl_trading.config import get_settings
+from hl_trading.pnl.rollup import rollup_pnl_daily
 from hl_trading.reconcile.reconciler import run_reconcile_once
 from hl_trading.replay.replay_runner import replay_file
 from hl_trading.runtime.engine import run_default_engine
@@ -36,6 +37,10 @@ def main() -> None:
 
     p_rc = sub.add_parser("reconcile", help="Compare API open orders vs Postgres journal")
     p_rc.set_defaults(fn=_cmd_reconcile)
+
+    p_pnl = sub.add_parser("pnl-rollup", help="Rebuild pnl_daily from fills (UTC days, rolling window)")
+    p_pnl.add_argument("--days", type=int, default=30, help="Lookback calendar days")
+    p_pnl.set_defaults(fn=_cmd_pnl_rollup)
 
     args = parser.parse_args()
     args.fn(args)
@@ -74,6 +79,12 @@ def _cmd_reconcile(_args: argparse.Namespace) -> None:
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
     run_reconcile_once(settings)
+
+
+def _cmd_pnl_rollup(args: argparse.Namespace) -> None:
+    logging.basicConfig(level=logging.INFO)
+    settings = get_settings()
+    rollup_pnl_daily(settings, lookback_days=args.days)
 
 
 if __name__ == "__main__":

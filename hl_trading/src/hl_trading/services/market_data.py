@@ -40,6 +40,13 @@ class MarketDataService:
         logger.info("subscribed userEvents user=%s id=%s", user, sid)
         return sid
 
+    def subscribe_user_fills(self, user: str, on_message: WsCallback) -> int:
+        sub: Subscription = {"type": "userFills", "user": user}
+        sid = self._info.subscribe(sub, on_message)
+        self._sub_ids.append(sid)
+        logger.info("subscribed userFills user=%s id=%s", user, sid)
+        return sid
+
     def subscribe_order_updates(self, user: str, on_message: WsCallback) -> int:
         sub: Subscription = {"type": "orderUpdates", "user": user}
         sid = self._info.subscribe(sub, on_message)

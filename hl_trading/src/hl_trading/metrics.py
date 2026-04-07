@@ -21,11 +21,13 @@ try:
     )
     ORDERS_SUBMITTED = Counter("hl_orders_submitted_total", "Orders sent or dry-run logged", ["dry_run"])
     RECONCILE_RUNS = Counter("hl_reconcile_runs_total", "Reconciliation runs", ["status"])
+    FILLS_INSERTED = Counter("hl_fills_inserted_total", "Fill rows inserted (deduped by hash)")
 except ImportError:  # pragma: no cover
     L2_UPDATES = None  # type: ignore[assignment]
     L2_APPLY_SECONDS = None  # type: ignore[assignment]
     ORDERS_SUBMITTED = None  # type: ignore[assignment]
     RECONCILE_RUNS = None  # type: ignore[assignment]
+    FILLS_INSERTED = None  # type: ignore[assignment]
     start_http_server = None  # type: ignore[assignment]
 
 

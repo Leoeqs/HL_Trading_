@@ -1,4 +1,4 @@
-"""Feeds → L2 books → strategy → execution; integrates optional storage + metrics."""
+"""Feeds → L2 books → strategy → execution; storage, fills, order updates, metrics."""
 
 from __future__ import annotations
 
@@ -16,6 +16,11 @@ from hl_trading.metrics import L2_APPLY_SECONDS, L2_UPDATES, ensure_metrics_serv
 from hl_trading.services.execution import ExecutionService
 from hl_trading.services.market_data import MarketDataService
 from hl_trading.services.portfolio import fetch_portfolio_view
+from hl_trading.services.ws_user_parsers import (
+    extract_fills_user_channel,
+    extract_fills_user_fills,
+    extract_order_updates,
+)
 from hl_trading.storage.hub import StorageHub
 from hl_trading.strategies.base import Strategy
 
@@ -64,6 +69,29 @@ class TradingEngine:
             except Exception:
                 logger.exception("execution failed for %s", intent)
 
+    def _persist_fills(self, fills: list[dict[str, Any]]) -> None:
+        store = self._hub.postgres_store if self._hub else None
+        if not store or not fills:
+            return
+        addr = self._settings.account_address.lower()
+        for f in fills:
+            store.enqueue_fill(addr, f)
+
+    def _on_user_fills(self, ws_msg: Any) -> None:
+        fills = extract_fills_user_fills(
+            ws_msg,
+            skip_snapshot=not self._settings.ingest_fill_snapshots,
+        )
+        self._persist_fills(fills)
+
+    def _on_order_updates(self, ws_msg: Any) -> None:
+        store = self._hub.postgres_store if self._hub else None
+        if not store:
+            return
+        addr = self._settings.account_address.lower()
+        for oid, st in extract_order_updates(ws_msg):
+            store.enqueue_order_status(addr, oid, st)
+
     def _on_l2(self, coin: str):
         def _cb(ws_msg: Any) -> None:
             if ws_msg.get("channel") != "l2Book":
@@ -100,6 +128,10 @@ class TradingEngine:
         return _cb
 
     def _on_user(self, msg: Any) -> None:
+        if self._hub and self._hub.postgres_store and self._settings.ingest_fills_from_user_events:
+            ch_fills = extract_fills_user_channel(msg)
+            self._persist_fills(ch_fills)
+
         self.refresh_portfolio()
         assert self._portfolio is not None
         intents = self._strategy.on_user_event(msg, self._portfolio)
@@ -118,6 +150,12 @@ class TradingEngine:
                 self._md.subscribe_bbo(coin, self._on_bbo(coin))
         self._md.subscribe_user_events(self._settings.account_address, self._on_user)
 
+        if self._hub and self._hub.postgres_store and self._settings.postgres_dsn:
+            if self._settings.ingest_fills_ws:
+                self._md.subscribe_user_fills(self._settings.account_address, self._on_user_fills)
+            if self._settings.track_order_updates:
+                self._md.subscribe_order_updates(self._settings.account_address, self._on_order_updates)
+
         def _handle_sig(*_args: object) -> None:
             logger.warning("shutdown signal")
             self._stop.set()
@@ -126,12 +164,14 @@ class TradingEngine:
         signal.signal(signal.SIGTERM, _handle_sig)
 
         logger.info(
-            "engine running network=%s dry_run=%s l2=%s bbo=%s coins=%s",
+            "engine network=%s dry_run=%s l2=%s bbo=%s coins=%s fills_ws=%s order_updates=%s",
             self._settings.hl_network,
             self._settings.dry_run,
             self._settings.subscribe_l2,
             self._settings.subscribe_bbo,
             self._settings.watch_coin_list(),
+            self._settings.ingest_fills_ws,
+            self._settings.track_order_updates,
         )
         while not self._stop.is_set():
             time.sleep(0.5)

@@ -9,6 +9,7 @@ from hyperliquid.exchange import Exchange
 from hyperliquid.utils.signing import OrderType
 from hyperliquid.utils.types import Cloid
 
+from hl_trading.adapters.hl_order_response import parse_order_placement_response
 from hl_trading.config import Settings
 from hl_trading.domain import LimitOrderIntent, PortfolioView
 from hl_trading.metrics import ORDERS_SUBMITTED
@@ -47,6 +48,10 @@ class ExecutionService:
         if intent.client_order_id_hex:
             cloid = Cloid.from_str(intent.client_order_id_hex)
         response: dict[str, Any] | None = None
+        normalized_status: str | None = None
+        exchange_oid: int | None = None
+        error_message: str | None = None
+
         if self._settings.dry_run:
             logger.info(
                 "[dry_run] would place %s %s %s @ %s ro=%s",
@@ -56,6 +61,7 @@ class ExecutionService:
                 intent.limit_px,
                 intent.reduce_only,
             )
+            normalized_status = "dry_run"
         else:
             is_buy = intent.side == "buy"
             response = self._exchange.order(
@@ -67,12 +73,17 @@ class ExecutionService:
                 intent.reduce_only,
                 cloid,
             )
+            normalized_status, exchange_oid, error_message = parse_order_placement_response(response)
+
         if self._journal:
             self._journal.enqueue_order_record(
                 intent,
                 portfolio,
                 response,
                 dry_run=self._settings.dry_run,
+                normalized_status=normalized_status,
+                exchange_oid=exchange_oid,
+                error_message=error_message,
             )
         if ORDERS_SUBMITTED is not None:
             ORDERS_SUBMITTED.labels(dry_run=str(self._settings.dry_run).lower()).inc()

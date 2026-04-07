@@ -42,6 +42,20 @@ class Settings(BaseSettings):
 
     postgres_dsn: str | None = Field(default=None, description="postgresql://… for orders / reconcile")
 
+    ingest_fills_ws: bool = Field(default=True, description="Subscribe to userFills and store rows when Postgres enabled")
+    ingest_fill_snapshots: bool = Field(
+        default=False,
+        description="If false, ignore userFills messages with isSnapshot=true (avoid duplicate history on restart)",
+    )
+    ingest_fills_from_user_events: bool = Field(
+        default=True,
+        description="Also persist fills embedded in `user` channel (userEvents); fills dedupe by hash",
+    )
+    track_order_updates: bool = Field(
+        default=True,
+        description="Subscribe to orderUpdates and update orders.status / hl_order_status in Postgres",
+    )
+
     clickhouse_host: str | None = Field(default=None)
     clickhouse_port: int = 8123
     clickhouse_user: str = "default"

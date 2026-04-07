@@ -2,27 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hl_trading.config import Settings
 from hl_trading.storage.clickhouse_l2 import ClickHouseL2Writer
 from hl_trading.storage.file_l2 import FileL2Writer
 from hl_trading.storage.l2_serialize import l2_record_bytes
-from hl_trading.storage.postgres_journal import PostgresOrderJournal
+from hl_trading.storage.postgres_store import PostgresStore
 from hl_trading.storage.redis_books import RedisBookMirror
+
+if TYPE_CHECKING:
+    from hl_trading.storage.postgres_journal import OrderJournal
 
 
 class StorageHub:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._pg: PostgresOrderJournal | None = None
+        self._pg: PostgresStore | None = None
         self._ch: ClickHouseL2Writer | None = None
         self._file: FileL2Writer | None = None
         self._redis: RedisBookMirror | None = None
 
     def start(self) -> None:
         if self._settings.postgres_dsn:
-            self._pg = PostgresOrderJournal(self._settings.postgres_dsn)
+            self._pg = PostgresStore(self._settings.postgres_dsn)
             self._pg.start()
         if self._settings.clickhouse_host:
             self._ch = ClickHouseL2Writer(
@@ -50,7 +53,11 @@ class StorageHub:
             self._pg.close()
 
     @property
-    def order_journal(self) -> PostgresOrderJournal | None:
+    def postgres_store(self) -> PostgresStore | None:
+        return self._pg
+
+    @property
+    def order_journal(self) -> OrderJournal | None:
         return self._pg
 
     def on_l2_ws_message(self, ws_msg: dict[str, Any], ingest_ns: int) -> None:

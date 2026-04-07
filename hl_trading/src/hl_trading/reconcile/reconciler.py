@@ -1,4 +1,4 @@
-"""Compare exchange `user_state` open orders with PostgreSQL journal (best-effort)."""
+"""Compare exchange open orders vs Postgres rows (OIDs + status='open')."""
 
 from __future__ import annotations
 
@@ -22,38 +22,62 @@ def run_reconcile_once(settings: Settings) -> dict[str, Any]:
     info = create_info_rest_only(settings)
     raw = info.user_state(settings.account_address)
     api_orders = raw.get("openOrders") or []
-    api_oids = []
+    api_oids: list[int] = []
     for o in api_orders:
         oid = o.get("oid")
         if oid is not None:
             api_oids.append(int(oid))
+    api_set = set(api_oids)
 
+    account = settings.account_address.lower()
     with psycopg.connect(settings.postgres_dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT count(*) FROM orders
-                WHERE dry_run = false AND created_at > now() - interval '7 days'
-                """
+                SELECT exchange_oid
+                FROM orders
+                WHERE lower(account) = %(account)s
+                  AND dry_run = false
+                  AND status = 'open'
+                  AND exchange_oid IS NOT NULL
+                """,
+                {"account": account},
             )
-            pg_recent = int(cur.fetchone()[0])
+            pg_open = {int(r[0]) for r in cur.fetchall() if r[0] is not None}
+
+            cur.execute(
+                """
+                SELECT count(*) FROM orders
+                WHERE lower(account) = %(account)s
+                  AND dry_run = false
+                  AND created_at > now() - interval '7 days'
+                """,
+                {"account": account},
+            )
+            pg_recent_orders = int(cur.fetchone()[0])
+
+        missing_in_pg = sorted(api_set - pg_open)
+        extra_in_pg = sorted(pg_open - api_set)
+        reconcile_status = "ok" if not missing_in_pg and not extra_in_pg else "mismatch"
 
         payload: dict[str, Any] = {
             "account": settings.account_address,
             "api_open_order_count": len(api_orders),
-            "api_oids_sample": api_oids[:50],
-            "postgres_orders_7d_not_dry_run": pg_recent,
+            "api_open_oids": sorted(api_set),
+            "postgres_open_oids": sorted(pg_open),
+            "missing_in_pg": missing_in_pg,
+            "extra_in_pg": extra_in_pg,
+            "postgres_orders_7d_not_dry_run": pg_recent_orders,
         }
-        status = "ok"
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO reconcile_runs (status, payload) VALUES (%s, %s)",
-                (status, Json(payload)),
+                (reconcile_status, Json(payload)),
             )
         conn.commit()
 
     if RECONCILE_RUNS is not None:
-        RECONCILE_RUNS.labels(status=status).inc()
+        RECONCILE_RUNS.labels(status=reconcile_status).inc()
 
     logger.info("reconcile %s", payload)
     return payload
