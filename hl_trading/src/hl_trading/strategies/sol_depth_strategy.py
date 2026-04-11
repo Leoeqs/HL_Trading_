@@ -18,7 +18,7 @@ Tune via environment variables (optional)::
     SOL_DEPTH_NEAR_MID_USD=0.1
     SOL_DEPTH_TICK=0.001
     SOL_DEPTH_SZ_DECIMALS=2
-    SOL_DEPTH_BUY_PCT=0.01
+    SOL_DEPTH_BUY_PCT=0.05
     SOL_DEPTH_SELL_POS_PCT=0.01
     SOL_DEPTH_POSITION_CAP_PCT=0.10
     SOL_DEPTH_MAX_ORDERS_PER_BOOK=12
@@ -137,7 +137,7 @@ class SolDepthStrategy:
         self._near_mid_usd = _env_float("SOL_DEPTH_NEAR_MID_USD", 0.1)
         self._tick = _env_float("SOL_DEPTH_TICK", 0.001)
         self._sz_decimals = _env_int("SOL_DEPTH_SZ_DECIMALS", 2)
-        self._buy_pct = _env_float("SOL_DEPTH_BUY_PCT", 0.01)
+        self._buy_pct = _env_float("SOL_DEPTH_BUY_PCT", 0.05)
         self._sell_pos_pct = _env_float("SOL_DEPTH_SELL_POS_PCT", 0.01)
         self._pos_cap_pct = _env_float("SOL_DEPTH_POSITION_CAP_PCT", 0.10)
         self._max_orders = _env_int("SOL_DEPTH_MAX_ORDERS_PER_BOOK", 12)
