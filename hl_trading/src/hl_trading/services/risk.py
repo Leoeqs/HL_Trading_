@@ -29,14 +29,15 @@ class NotionalLimitRisk:
             return 0.0
         if bool(raw_order.get("reduceOnly")):
             return 0.0
-        side = str(raw_order.get("side", "")).lower()
+        side_raw = str(raw_order.get("side", "")).lower()
         try:
             size = abs(float(raw_order.get("sz", 0.0)))
         except (TypeError, ValueError):
             return 0.0
-        if side == "buy":
+        # Hyperliquid open orders use "B" / "A" (see Info.open_orders docs)
+        if side_raw in ("buy", "b"):
             return size
-        if side == "sell":
+        if side_raw in ("sell", "a", "ask"):
             return -size
         return 0.0
 

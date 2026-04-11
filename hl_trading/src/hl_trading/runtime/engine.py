@@ -58,6 +58,8 @@ class TradingEngine:
         self._portfolio_refresh_inflight = False
         self._last_portfolio_refresh_monotonic = 0.0
         self._stop = threading.Event()
+        self._l2_tick_count = 0
+        self._last_l2_heartbeat_monotonic = 0.0
 
     def refresh_portfolio(self) -> PortfolioView:
         portfolio = fetch_portfolio_view(self._info, self._settings.account_address)
@@ -147,6 +149,22 @@ class TradingEngine:
             if portfolio is None:
                 portfolio = self.refresh_portfolio()
             intents = self._strategy.on_l2_book(coin, book, portfolio)
+            self._l2_tick_count += 1
+            now = time.monotonic()
+            if now - self._last_l2_heartbeat_monotonic >= 15.0:
+                self._last_l2_heartbeat_monotonic = now
+                db, da = book.depth_levels()
+                bb = book.best_bid()
+                logger.info(
+                    "l2 heartbeat #%d coin=%s book_depth=%d/%d mid=%s best_bid=%s strategy_intents=%d",
+                    self._l2_tick_count,
+                    coin,
+                    db,
+                    da,
+                    book.mid(),
+                    (bb.px, bb.sz) if bb else None,
+                    len(intents),
+                )
             self._dispatch_intents(intents)
 
         return _cb

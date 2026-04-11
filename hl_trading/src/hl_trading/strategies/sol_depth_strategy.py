@@ -1,5 +1,9 @@
 """SOL perp: front-run large resting liquidity (≥1000 SOL) within $0.10 of mid.
 
+**Hyperliquid L2 feed limit:** REST and websocket ``l2Book`` snapshots expose **at most ~20 bid
+and 20 ask price levels**. A large wall that appears deep on the website may be **invisible** to
+this bot if it is beyond those levels — lower ``SOL_DEPTH_THRESHOLD_SOL`` or widen logic if needed.
+
 Accumulate (position ≤10% of account): for each bid level with size ≥ threshold, place a buy
 one tick above the wall; size = fraction of account equity (USD) per order.
 
@@ -133,6 +137,21 @@ def _round_sz(sz: float, decimals: int) -> float:
     return round(sz + 1e-12, decimals)
 
 
+def _qualifying_bids_in_band(
+    book: PerpL2Book, mid: float, *, threshold_sol: float, near_mid_usd: float
+) -> tuple[int, float]:
+    """Count bid levels in band with sz >= threshold; return (count, max_sz among them)."""
+    n = 0
+    mx = 0.0
+    for lvl in book.bids_desc():
+        if abs(lvl.px - mid) > near_mid_usd + 1e-9:
+            continue
+        if lvl.sz >= threshold_sol:
+            n += 1
+            mx = max(mx, lvl.sz)
+    return n, mx
+
+
 class SolDepthStrategy:
     """Requires ``WATCH_COINS`` to include ``SOL`` so the engine subscribes to SOL L2."""
 
@@ -151,6 +170,7 @@ class SolDepthStrategy:
         self._warned_buy_clip_too_small = False
         self._debug = _env_bool("SOL_DEPTH_DEBUG", False)
         self._last_debug_log_m: float = 0.0
+        self._last_strategy_diag_m: float = 0.0
 
     def on_bbo(self, coin: str, msg: Any, portfolio: PortfolioView) -> list[LimitOrderIntent]:
         return []
@@ -159,7 +179,7 @@ class SolDepthStrategy:
         return []
 
     def on_l2_book(self, coin: str, book: PerpL2Book, portfolio: PortfolioView) -> list[LimitOrderIntent]:
-        if coin != COIN:
+        if str(coin).strip().upper() != COIN:
             return []
 
         mid = book.mid()
@@ -264,8 +284,27 @@ class SolDepthStrategy:
                 )
             )
 
+        now = time.monotonic()
+        if now - self._last_strategy_diag_m >= 30.0:
+            self._last_strategy_diag_m = now
+            db, da = book.depth_levels()
+            n_qual, mx_qual = _qualifying_bids_in_band(
+                book, mid, threshold_sol=self._threshold_sol, near_mid_usd=self._near_mid_usd
+            )
+            logger.info(
+                "SolDepthStrategy: HL L2 depth ~%d bids / %d asks (API cap ~20/side); "
+                "±%.2f USD of mid: %d bid level(s) ≥%.0f SOL (max sz %.1f); equity ~%.2f USD; intents=%d",
+                db,
+                da,
+                self._near_mid_usd,
+                n_qual,
+                self._threshold_sol,
+                mx_qual,
+                av,
+                len(out),
+            )
+
         if self._debug:
-            now = time.monotonic()
             if now - self._last_debug_log_m >= 5.0:
                 self._last_debug_log_m = now
                 bb, ba = book.best_bid(), book.best_ask()
