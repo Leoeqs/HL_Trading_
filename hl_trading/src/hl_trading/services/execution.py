@@ -64,15 +64,29 @@ class ExecutionService:
             normalized_status = "dry_run"
         else:
             is_buy = intent.side == "buy"
-            response = self._exchange.order(
-                intent.coin,
-                is_buy,
-                intent.size,
-                intent.limit_px,
-                _intent_to_order_type(intent),
-                intent.reduce_only,
-                cloid,
-            )
+            try:
+                response = self._exchange.order(
+                    intent.coin,
+                    is_buy,
+                    intent.size,
+                    intent.limit_px,
+                    _intent_to_order_type(intent),
+                    intent.reduce_only,
+                    cloid,
+                )
+            except Exception:
+                logger.exception(
+                    "exchange.order raised for %s %s %s @ %s",
+                    intent.side,
+                    intent.size,
+                    intent.coin,
+                    intent.limit_px,
+                )
+                raise
+            if not isinstance(response, dict):
+                logger.error("exchange.order returned non-dict: %r", response)
+            elif response.get("status") != "ok":
+                logger.warning("exchange HTTP response status=%s: %s", response.get("status"), response)
             normalized_status, exchange_oid, error_message = parse_order_placement_response(response)
             logger.info(
                 "order %s %s %s @ %s ro=%s -> %s oid=%s err=%s",

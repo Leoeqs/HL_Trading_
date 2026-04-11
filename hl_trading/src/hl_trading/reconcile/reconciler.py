@@ -11,6 +11,7 @@ from psycopg.types.json import Json
 from hl_trading.adapters.hyperliquid_factory import create_info_rest_only
 from hl_trading.config import Settings
 from hl_trading.metrics import RECONCILE_RUNS
+from hl_trading.services.portfolio import fetch_portfolio_view
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,8 @@ def run_reconcile_once(settings: Settings) -> dict[str, Any]:
         raise SystemExit("POSTGRES_DSN is required for reconcile")
 
     info = create_info_rest_only(settings)
-    raw = info.user_state(settings.account_address)
+    view = fetch_portfolio_view(info, settings.account_address)
+    raw = view.raw or {}
     api_orders = raw.get("openOrders") or []
     api_oids: list[int] = []
     for o in api_orders:

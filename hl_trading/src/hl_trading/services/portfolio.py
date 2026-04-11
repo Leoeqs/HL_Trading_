@@ -27,7 +27,20 @@ def _extract_positions(user_state: dict[str, Any]) -> dict[str, float]:
 
 
 def fetch_portfolio_view(info: Info, account_address: str, dex: str = "") -> PortfolioView:
-    raw = info.user_state(account_address, dex=dex)
+    """Merge ``clearinghouseState`` (user_state) with the dedicated ``openOrders`` info call.
+
+    Hyperliquid's ``user_state`` / clearinghouse payload often **does not** include resting
+    orders; strategy dedup and risk need ``raw[\"openOrders\"]`` from ``open_orders()``."""
+    raw_in = info.user_state(account_address, dex=dex)
+    raw: dict[str, Any] = dict(raw_in) if isinstance(raw_in, dict) else {}
+
+    try:
+        oo = info.open_orders(account_address, dex=dex)
+        if isinstance(oo, list):
+            raw["openOrders"] = oo
+    except Exception:
+        logger.exception("open_orders failed; keeping any openOrders from user_state only")
+
     positions = _extract_positions(raw)
     margin = raw.get("marginSummary") or {}
     orders = raw.get("openOrders") or []

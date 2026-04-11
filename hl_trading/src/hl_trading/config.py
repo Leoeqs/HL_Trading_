@@ -83,6 +83,13 @@ class Settings(BaseSettings):
         description="If set, Exchange.update_leverage(leverage, coin, cross=True) once per watch coin at engine start (skip when dry_run)",
     )
 
+    portfolio_refresh_interval_sec: float = Field(
+        default=3.0,
+        ge=0.0,
+        validation_alias=AliasChoices("HL_PORTFOLIO_REFRESH_SEC", "portfolio_refresh_interval_sec"),
+        description="Background REST refresh of user_state + open orders (0 = disable). Keeps risk/dedup aligned with exchange.",
+    )
+
     def watch_coin_list(self) -> list[str]:
         parts = [x.strip() for x in self.watch_coins.split(",") if x.strip()]
         return parts or ["BTC"]

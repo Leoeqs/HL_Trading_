@@ -99,6 +99,8 @@ class TradingEngine:
         portfolio = self._current_portfolio()
         if portfolio is None:
             portfolio = self.refresh_portfolio()
+        if intents:
+            logger.info("dispatching %d order intent(s)", len(intents))
         for intent in intents:
             try:
                 self._exec.place_limit(portfolio, intent, mid_px=None)
@@ -118,6 +120,8 @@ class TradingEngine:
             ws_msg,
             skip_snapshot=not self._settings.ingest_fill_snapshots,
         )
+        if fills:
+            logger.info("userFills: received %d fill(s)", len(fills))
         self._persist_fills(fills)
 
     def _on_order_updates(self, ws_msg: Any) -> None:
@@ -231,7 +235,7 @@ class TradingEngine:
                         logger.exception("update_leverage failed for %s", coin)
 
         logger.info(
-            "engine network=%s dry_run=%s l2=%s bbo=%s coins=%s fills_ws=%s order_updates=%s",
+            "engine network=%s dry_run=%s l2=%s bbo=%s coins=%s fills_ws=%s order_updates=%s portfolio_refresh_s=%s",
             self._settings.hl_network,
             self._settings.dry_run,
             self._settings.subscribe_l2,
@@ -239,9 +243,18 @@ class TradingEngine:
             self._settings.watch_coin_list(),
             self._settings.ingest_fills_ws,
             self._settings.track_order_updates,
+            self._settings.portfolio_refresh_interval_sec,
         )
+        last_periodic_pf = time.monotonic()
+        interval = self._settings.portfolio_refresh_interval_sec
         while not self._stop.is_set():
             time.sleep(0.5)
+            if interval > 0 and time.monotonic() - last_periodic_pf >= interval:
+                last_periodic_pf = time.monotonic()
+                try:
+                    self.refresh_portfolio()
+                except Exception:
+                    logger.exception("periodic portfolio refresh failed")
         if self._hub:
             self._hub.shutdown()
         if self._info.ws_manager:
