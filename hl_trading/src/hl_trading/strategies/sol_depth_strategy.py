@@ -19,12 +19,14 @@ Tune via environment variables (optional)::
     SOL_DEPTH_POSITION_CAP_PCT=0.10
     SOL_DEPTH_MAX_ORDERS_PER_BOOK=12
     SOL_DEPTH_MIN_NOTIONAL_USD=5.0
+    SOL_DEPTH_DEBUG=0   # if 1, log throttled snapshot (av, szi, reduce_mode, intents)
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 from hl_trading.book.l2 import PerpL2Book
@@ -47,6 +49,13 @@ def _env_int(name: str, default: int) -> int:
     if raw is None or raw.strip() == "":
         return default
     return int(raw)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _account_value_usd(margin: dict[str, Any]) -> float:
@@ -139,6 +148,9 @@ class SolDepthStrategy:
         self._min_notional = _env_float("SOL_DEPTH_MIN_NOTIONAL_USD", 5.0)
         self._warned_reduce_mode = False
         self._warned_low_account = False
+        self._warned_buy_clip_too_small = False
+        self._debug = _env_bool("SOL_DEPTH_DEBUG", False)
+        self._last_debug_log_m: float = 0.0
 
     def on_bbo(self, coin: str, msg: Any, portfolio: PortfolioView) -> list[LimitOrderIntent]:
         return []
@@ -209,6 +221,20 @@ class SolDepthStrategy:
                 )
             return out
 
+        buy_clip_usd = self._buy_pct * av
+        if buy_clip_usd < self._min_notional:
+            if not self._warned_buy_clip_too_small:
+                logger.warning(
+                    "SolDepthStrategy: each buy is %.2f%% of account ≈ %.2f USD, below SOL_DEPTH_MIN_NOTIONAL_USD=%.2f — "
+                    "no buys until equity is higher (~%.0f USD+ at 1%%/5 USD min) or lower SOL_DEPTH_MIN_NOTIONAL_USD / raise SOL_DEPTH_BUY_PCT",
+                    self._buy_pct * 100,
+                    buy_clip_usd,
+                    self._min_notional,
+                    self._min_notional / self._buy_pct if self._buy_pct > 0 else 0.0,
+                )
+                self._warned_buy_clip_too_small = True
+            return []
+
         for lvl in book.bids_desc():
             if len(out) >= self._max_orders:
                 break
@@ -237,5 +263,21 @@ class SolDepthStrategy:
                     tif="Gtc",
                 )
             )
+
+        if self._debug:
+            now = time.monotonic()
+            if now - self._last_debug_log_m >= 5.0:
+                self._last_debug_log_m = now
+                bb, ba = book.best_bid(), book.best_ask()
+                logger.info(
+                    "SolDepthStrategy debug: av=%.2f szi=%s reduce=%s mid=%s bb=%s ba=%s intents=%d",
+                    av,
+                    szi,
+                    reduce_mode,
+                    mid,
+                    (bb.px, bb.sz) if bb else None,
+                    (ba.px, ba.sz) if ba else None,
+                    len(out),
+                )
 
         return out
