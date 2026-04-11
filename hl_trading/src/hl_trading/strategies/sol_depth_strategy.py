@@ -4,11 +4,13 @@
 and 20 ask price levels**. A large wall that appears deep on the website may be **invisible** to
 this bot if it is beyond those levels — lower ``SOL_DEPTH_THRESHOLD_SOL`` or widen logic if needed.
 
-Accumulate (position ≤50% of account): for each bid level with size ≥ threshold, place a buy
-one tick above the wall; size = fraction of account equity (USD) per order.
+Accumulate: for each bid level with size ≥ threshold, place a buy one tick above the wall;
+size = fraction of account equity (USD) per order.
 
-Reduce (position >50% of account): for each ask level with size ≥ threshold, place a sell
-one tick below the wall; size = fraction of long position (SOL); ``reduce_only=True``.
+Optional reduce-only sells when long and ``pos_pct > SOL_DEPTH_POSITION_CAP_PCT``: place sells
+one tick below large asks (``reduce_only=True``). By default **buys are not paused** when over
+that cap — only ``SOL_DEPTH_PAUSE_BUYS_WHEN_OVER_CAP=true`` restores the old “sell-only” behavior.
+Use ``MAX_POSITION_USD_PER_COIN`` (risk) to cap total exposure instead.
 
 Hyperliquid coin symbol: ``SOL``. Tick/size rounding are fixed for SOL meta (tick 0.001, sz 2 dp).
 
@@ -21,6 +23,7 @@ Tune via environment variables (optional)::
     SOL_DEPTH_BUY_PCT=0.05
     SOL_DEPTH_SELL_POS_PCT=0.01
     SOL_DEPTH_POSITION_CAP_PCT=0.50
+    SOL_DEPTH_PAUSE_BUYS_WHEN_OVER_CAP=false
     SOL_DEPTH_MAX_ORDERS_PER_BOOK=12
     SOL_DEPTH_MIN_NOTIONAL_USD=2.0
     SOL_DEPTH_DEBUG=0   # if 1, log throttled snapshot (av, szi, reduce_mode, intents)
@@ -140,6 +143,7 @@ class SolDepthStrategy:
         self._buy_pct = _env_float("SOL_DEPTH_BUY_PCT", 0.05)
         self._sell_pos_pct = _env_float("SOL_DEPTH_SELL_POS_PCT", 0.01)
         self._pos_cap_pct = _env_float("SOL_DEPTH_POSITION_CAP_PCT", 0.50)
+        self._pause_buys_when_over_cap = _env_bool("SOL_DEPTH_PAUSE_BUYS_WHEN_OVER_CAP", False)
         self._max_orders = _env_int("SOL_DEPTH_MAX_ORDERS_PER_BOOK", 12)
         self._min_notional = _env_float("SOL_DEPTH_MIN_NOTIONAL_USD", 2.0)
         self._warned_reduce_mode = False
@@ -182,12 +186,21 @@ class SolDepthStrategy:
 
         if reduce_mode:
             if not self._warned_reduce_mode:
-                logger.info(
-                    "SolDepthStrategy: position ~%.1f%% of account (>%d%% cap) — only **sell** intents (ask side); "
-                    "bid walls are ignored until size drops",
-                    pos_pct * 100,
-                    int(self._pos_cap_pct * 100),
-                )
+                if self._pause_buys_when_over_cap:
+                    logger.info(
+                        "SolDepthStrategy: position ~%.1f%% of account (>%d%% cap) — **sell-only** "
+                        "(SOL_DEPTH_PAUSE_BUYS_WHEN_OVER_CAP=true); bid walls skipped until size drops",
+                        pos_pct * 100,
+                        int(self._pos_cap_pct * 100),
+                    )
+                else:
+                    logger.info(
+                        "SolDepthStrategy: position ~%.1f%% of account (>%d%% cap) — emitting reduce-only sells "
+                        "where asks qualify; **buys still enabled** (pause buys: set "
+                        "SOL_DEPTH_PAUSE_BUYS_WHEN_OVER_CAP=true)",
+                        pos_pct * 100,
+                        int(self._pos_cap_pct * 100),
+                    )
                 self._warned_reduce_mode = True
             for lvl in book.asks_asc():
                 if len(out) >= self._max_orders:
@@ -216,7 +229,8 @@ class SolDepthStrategy:
                         tif="Gtc",
                     )
                 )
-            return out
+            if self._pause_buys_when_over_cap:
+                return out
 
         buy_clip_usd = self._buy_pct * av
         if buy_clip_usd < self._min_notional:
