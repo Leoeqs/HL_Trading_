@@ -23,11 +23,14 @@ Tune via environment variables (optional)::
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from hl_trading.book.l2 import PerpL2Book
 from hl_trading.domain import LimitOrderIntent, PortfolioView
+
+logger = logging.getLogger(__name__)
 
 COIN = "SOL"
 
@@ -55,6 +58,19 @@ def _account_value_usd(margin: dict[str, Any]) -> float:
             except (TypeError, ValueError):
                 continue
     return 0.0
+
+
+def _account_value_from_portfolio(portfolio: PortfolioView) -> float:
+    """Prefer ``marginSummary``; fall back to ``crossMarginSummary`` (HL often fills one or the other)."""
+    av = _account_value_usd(portfolio.margin_summary)
+    if av > 0:
+        return av
+    raw = portfolio.raw if isinstance(portfolio.raw, dict) else {}
+    for key in ("crossMarginSummary", "marginSummary"):
+        m = raw.get(key)
+        if isinstance(m, dict):
+            av = max(av, _account_value_usd(m))
+    return av
 
 
 def _norm_side(s: Any) -> str:
@@ -121,6 +137,8 @@ class SolDepthStrategy:
         self._pos_cap_pct = _env_float("SOL_DEPTH_POSITION_CAP_PCT", 0.10)
         self._max_orders = _env_int("SOL_DEPTH_MAX_ORDERS_PER_BOOK", 12)
         self._min_notional = _env_float("SOL_DEPTH_MIN_NOTIONAL_USD", 5.0)
+        self._warned_reduce_mode = False
+        self._warned_low_account = False
 
     def on_bbo(self, coin: str, msg: Any, portfolio: PortfolioView) -> list[LimitOrderIntent]:
         return []
@@ -136,8 +154,14 @@ class SolDepthStrategy:
         if mid is None:
             return []
 
-        av = _account_value_usd(portfolio.margin_summary)
+        av = _account_value_from_portfolio(portfolio)
         if av <= self._min_notional:
+            if not self._warned_low_account:
+                logger.warning(
+                    "SolDepthStrategy: account value unreadable or <= %.2f USD — no orders (check marginSummary / crossMarginSummary)",
+                    self._min_notional,
+                )
+                self._warned_low_account = True
             return []
 
         szi = float(portfolio.positions.get(COIN, 0.0))
@@ -148,6 +172,14 @@ class SolDepthStrategy:
         out: list[LimitOrderIntent] = []
 
         if reduce_mode:
+            if not self._warned_reduce_mode:
+                logger.info(
+                    "SolDepthStrategy: position ~%.1f%% of account (>%d%% cap) — only **sell** intents (ask side); "
+                    "bid walls are ignored until size drops",
+                    pos_pct * 100,
+                    int(self._pos_cap_pct * 100),
+                )
+                self._warned_reduce_mode = True
             for lvl in book.asks_asc():
                 if len(out) >= self._max_orders:
                     break
