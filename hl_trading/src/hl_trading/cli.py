@@ -13,16 +13,16 @@ from hl_trading.config import get_settings
 from hl_trading.pnl.rollup import rollup_pnl_daily
 from hl_trading.reconcile.reconciler import run_reconcile_once
 from hl_trading.replay.replay_runner import replay_file
+from hl_trading.strategies.loader import load_strategy
 from hl_trading.runtime.engine import run_default_engine
 from hl_trading.services.portfolio import fetch_portfolio_view
-from hl_trading.strategies.null_strategy import NullStrategy
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="hl-trade")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_run = sub.add_parser("run", help="Live engine: L2 books + optional storage + NullStrategy")
+    p_run = sub.add_parser("run", help="Live engine (strategy from HL_STRATEGY or NullStrategy)")
     p_run.set_defaults(fn=_cmd_run)
 
     p_sn = sub.add_parser("snapshot", help="Print user_state JSON (REST only)")
@@ -68,7 +68,7 @@ def _cmd_replay(args: argparse.Namespace) -> None:
     replay_file(
         args.ndjson,
         settings,
-        NullStrategy(),
+        load_strategy(get_settings().strategy_entrypoint),
         max_events=args.max_events,
         sleep_s=args.sleep,
         log_every=args.log_every,

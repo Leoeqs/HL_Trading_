@@ -50,10 +50,7 @@ class ClickHouseL2Writer:
 
     def close(self) -> None:
         self._stop.set()
-        try:
-            self._q.put_nowait(None)
-        except queue.Full:
-            pass
+        self._enqueue_shutdown()
         self._thread.join(timeout=10.0)
 
     def enqueue_raw_message(self, ws_msg: dict[str, Any], ingest_ns: int) -> None:
@@ -64,6 +61,14 @@ class ClickHouseL2Writer:
             self._q.put_nowait(payload)
         except queue.Full:
             logger.error("clickhouse l2 queue full; drop")
+
+    def _enqueue_shutdown(self) -> None:
+        while self._thread.is_alive():
+            try:
+                self._q.put(None, timeout=0.1)
+                return
+            except queue.Full:
+                logger.warning("clickhouse l2 queue full during shutdown; waiting to flush")
 
     def _flush(self, buf: list[tuple[int, str, int, str]]) -> None:
         if not buf or self._client is None:

@@ -23,6 +23,7 @@ from hl_trading.services.ws_user_parsers import (
 )
 from hl_trading.storage.hub import StorageHub
 from hl_trading.strategies.base import Strategy
+from hl_trading.strategies.loader import load_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -53,19 +54,52 @@ class TradingEngine:
             order_journal=self._hub.order_journal if self._hub else None,
         )
         self._portfolio: PortfolioView | None = None
+        self._portfolio_lock = threading.Lock()
+        self._portfolio_refresh_inflight = False
+        self._last_portfolio_refresh_monotonic = 0.0
         self._stop = threading.Event()
 
     def refresh_portfolio(self) -> PortfolioView:
-        self._portfolio = fetch_portfolio_view(self._info, self._settings.account_address)
-        return self._portfolio
+        portfolio = fetch_portfolio_view(self._info, self._settings.account_address)
+        with self._portfolio_lock:
+            self._portfolio = portfolio
+            self._last_portfolio_refresh_monotonic = time.monotonic()
+        return portfolio
+
+    def _current_portfolio(self) -> PortfolioView | None:
+        with self._portfolio_lock:
+            return self._portfolio
+
+    def _refresh_portfolio_async(self) -> None:
+        try:
+            self.refresh_portfolio()
+        except Exception:
+            logger.exception("background portfolio refresh failed")
+        finally:
+            with self._portfolio_lock:
+                self._portfolio_refresh_inflight = False
+
+    def _schedule_portfolio_refresh(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        with self._portfolio_lock:
+            if self._portfolio_refresh_inflight:
+                return
+            if not force and now - self._last_portfolio_refresh_monotonic < 0.25:
+                return
+            self._portfolio_refresh_inflight = True
+        threading.Thread(
+            target=self._refresh_portfolio_async,
+            name="portfolio-refresh",
+            daemon=True,
+        ).start()
 
     def _dispatch_intents(self, intents: list[Any]) -> None:
-        if not self._portfolio:
-            self.refresh_portfolio()
-        assert self._portfolio is not None
+        portfolio = self._current_portfolio()
+        if portfolio is None:
+            portfolio = self.refresh_portfolio()
         for intent in intents:
             try:
-                self._exec.place_limit(self._portfolio, intent, mid_px=None)
+                self._exec.place_limit(portfolio, intent, mid_px=None)
             except Exception:
                 logger.exception("execution failed for %s", intent)
 
@@ -109,20 +143,20 @@ class TradingEngine:
                 self._hub.on_l2_ws_message(ws_msg, ingest_ns)
                 self._hub.publish_book(coin, book.to_snapshot_payload())
 
-            if self._portfolio is None:
-                self.refresh_portfolio()
-            assert self._portfolio is not None
-            intents = self._strategy.on_l2_book(coin, book, self._portfolio)
+            portfolio = self._current_portfolio()
+            if portfolio is None:
+                portfolio = self.refresh_portfolio()
+            intents = self._strategy.on_l2_book(coin, book, portfolio)
             self._dispatch_intents(intents)
 
         return _cb
 
     def _on_bbo(self, coin: str):
         def _cb(msg: Any) -> None:
-            if self._portfolio is None:
-                self.refresh_portfolio()
-            assert self._portfolio is not None
-            intents = self._strategy.on_bbo(coin, msg, self._portfolio)
+            portfolio = self._current_portfolio()
+            if portfolio is None:
+                portfolio = self.refresh_portfolio()
+            intents = self._strategy.on_bbo(coin, msg, portfolio)
             self._dispatch_intents(intents)
 
         return _cb
@@ -132,9 +166,12 @@ class TradingEngine:
             ch_fills = extract_fills_user_channel(msg)
             self._persist_fills(ch_fills)
 
-        self.refresh_portfolio()
-        assert self._portfolio is not None
-        intents = self._strategy.on_user_event(msg, self._portfolio)
+        portfolio = self._current_portfolio()
+        if portfolio is None:
+            portfolio = self.refresh_portfolio()
+        else:
+            self._schedule_portfolio_refresh(force=True)
+        intents = self._strategy.on_user_event(msg, portfolio)
         self._dispatch_intents(intents)
 
     def run_forever(self) -> None:
@@ -184,7 +221,5 @@ class TradingEngine:
 
 def run_default_engine() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    from hl_trading.strategies.null_strategy import NullStrategy
-
     settings = get_settings()
-    TradingEngine(settings, NullStrategy()).run_forever()
+    TradingEngine(settings, load_strategy(settings.strategy_entrypoint)).run_forever()

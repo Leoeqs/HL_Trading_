@@ -6,6 +6,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -58,17 +59,18 @@ class PostgresStore(OrderJournal):
         self._dsn = dsn
         self._q: queue.Queue[_QueueItem] = queue.Queue(maxsize=queue_max)
         self._stop = threading.Event()
+        self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, name="postgres-store", daemon=True)
 
     def start(self) -> None:
         self._thread.start()
+        while not self._ready.wait(timeout=0.1):
+            if not self._thread.is_alive():
+                raise RuntimeError("postgres store thread exited before initial connection")
 
     def close(self) -> None:
         self._stop.set()
-        try:
-            self._q.put_nowait(None)
-        except queue.Full:
-            pass
+        self._enqueue_shutdown()
         self._thread.join(timeout=10.0)
 
     def enqueue_order_record(
@@ -115,27 +117,46 @@ class PostgresStore(OrderJournal):
         except queue.Full:
             logger.error("postgres store queue full; dropping item")
 
+    def _enqueue_shutdown(self) -> None:
+        while self._thread.is_alive():
+            try:
+                self._q.put(None, timeout=0.1)
+                return
+            except queue.Full:
+                logger.warning("postgres store queue full during shutdown; waiting to flush")
+
     def _run(self) -> None:
-        with psycopg.connect(self._dsn) as conn:
-            conn.execute("SET application_name = 'hl_trading_store'")
-            while not self._stop.is_set():
-                try:
-                    item = self._q.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-                if item is None:
-                    break
-                try:
-                    if isinstance(item, _QOrderInsert):
-                        self._do_order_insert(conn, item)
-                    elif isinstance(item, _QFillInsert):
-                        self._do_fill_insert(conn, item)
-                    elif isinstance(item, _QOrderStatus):
-                        self._do_order_status(conn, item)
-                    conn.commit()
-                except Exception:
-                    logger.exception("postgres store transaction failed")
-                    conn.rollback()
+        while True:
+            try:
+                with psycopg.connect(self._dsn) as conn:
+                    conn.execute("SET application_name = 'hl_trading_store'")
+                    self._ready.set()
+                    logger.info("postgres store connected")
+                    while True:
+                        try:
+                            item = self._q.get(timeout=0.5)
+                        except queue.Empty:
+                            if self._stop.is_set():
+                                continue
+                            continue
+                        if item is None:
+                            return
+                        try:
+                            if isinstance(item, _QOrderInsert):
+                                self._do_order_insert(conn, item)
+                            elif isinstance(item, _QFillInsert):
+                                self._do_fill_insert(conn, item)
+                            elif isinstance(item, _QOrderStatus):
+                                self._do_order_status(conn, item)
+                            conn.commit()
+                        except Exception:
+                            logger.exception("postgres store transaction failed")
+                            conn.rollback()
+            except Exception:
+                if self._stop.is_set():
+                    return
+                logger.exception("postgres store connection failed; retrying in 1s")
+                time.sleep(1.0)
 
     def _do_order_insert(self, conn: psycopg.Connection, item: _QOrderInsert) -> None:
         conn.execute(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     hl_network: Literal["mainnet", "testnet"] = "testnet"
@@ -68,6 +69,12 @@ class Settings(BaseSettings):
     l2_local_ndjson_path: str | None = Field(
         default=None,
         description="If set, append one JSON line per l2 message for offline replay (hot path: buffered write)",
+    )
+
+    strategy_entrypoint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("HL_STRATEGY", "strategy_entrypoint"),
+        description="`module.path:ClassName` for Strategy (no-arg ctor); unset = NullStrategy",
     )
 
     def watch_coin_list(self) -> list[str]:

@@ -26,10 +26,7 @@ class FileL2Writer:
 
     def close(self) -> None:
         self._stop.set()
-        try:
-            self._q.put_nowait(None)
-        except queue.Full:
-            pass
+        self._enqueue_shutdown()
         self._thread.join(timeout=10.0)
 
     def enqueue_payload(self, payload: bytes) -> None:
@@ -37,6 +34,14 @@ class FileL2Writer:
             self._q.put_nowait(payload)
         except queue.Full:
             logger.error("file l2 queue full; drop")
+
+    def _enqueue_shutdown(self) -> None:
+        while self._thread.is_alive():
+            try:
+                self._q.put(None, timeout=0.1)
+                return
+            except queue.Full:
+                logger.warning("file l2 queue full during shutdown; waiting to flush")
 
     def _run(self) -> None:
         buf: list[bytes] = []
