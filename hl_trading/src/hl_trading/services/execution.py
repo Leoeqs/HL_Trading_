@@ -74,6 +74,17 @@ class ExecutionService:
                 cloid,
             )
             normalized_status, exchange_oid, error_message = parse_order_placement_response(response)
+            logger.info(
+                "order %s %s %s @ %s ro=%s -> %s oid=%s err=%s",
+                intent.side,
+                intent.size,
+                intent.coin,
+                intent.limit_px,
+                intent.reduce_only,
+                normalized_status,
+                exchange_oid,
+                error_message,
+            )
 
         if self._journal:
             self._journal.enqueue_order_record(
