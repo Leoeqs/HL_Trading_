@@ -4,10 +4,10 @@
 and 20 ask price levels**. A large wall that appears deep on the website may be **invisible** to
 this bot if it is beyond those levels — lower ``SOL_DEPTH_THRESHOLD_SOL`` or widen logic if needed.
 
-Accumulate (position ≤10% of account): for each bid level with size ≥ threshold, place a buy
+Accumulate (position ≤50% of account): for each bid level with size ≥ threshold, place a buy
 one tick above the wall; size = fraction of account equity (USD) per order.
 
-Reduce (position >10% of account): for each ask level with size ≥ threshold, place a sell
+Reduce (position >50% of account): for each ask level with size ≥ threshold, place a sell
 one tick below the wall; size = fraction of long position (SOL); ``reduce_only=True``.
 
 Hyperliquid coin symbol: ``SOL``. Tick/size rounding are fixed for SOL meta (tick 0.001, sz 2 dp).
@@ -20,7 +20,7 @@ Tune via environment variables (optional)::
     SOL_DEPTH_SZ_DECIMALS=2
     SOL_DEPTH_BUY_PCT=0.05
     SOL_DEPTH_SELL_POS_PCT=0.01
-    SOL_DEPTH_POSITION_CAP_PCT=0.10
+    SOL_DEPTH_POSITION_CAP_PCT=0.50
     SOL_DEPTH_MAX_ORDERS_PER_BOOK=12
     SOL_DEPTH_MIN_NOTIONAL_USD=2.0
     SOL_DEPTH_DEBUG=0   # if 1, log throttled snapshot (av, szi, reduce_mode, intents)
@@ -139,7 +139,7 @@ class SolDepthStrategy:
         self._sz_decimals = _env_int("SOL_DEPTH_SZ_DECIMALS", 2)
         self._buy_pct = _env_float("SOL_DEPTH_BUY_PCT", 0.05)
         self._sell_pos_pct = _env_float("SOL_DEPTH_SELL_POS_PCT", 0.01)
-        self._pos_cap_pct = _env_float("SOL_DEPTH_POSITION_CAP_PCT", 0.10)
+        self._pos_cap_pct = _env_float("SOL_DEPTH_POSITION_CAP_PCT", 0.50)
         self._max_orders = _env_int("SOL_DEPTH_MAX_ORDERS_PER_BOOK", 12)
         self._min_notional = _env_float("SOL_DEPTH_MIN_NOTIONAL_USD", 2.0)
         self._warned_reduce_mode = False
