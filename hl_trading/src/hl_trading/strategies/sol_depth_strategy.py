@@ -35,6 +35,7 @@ from typing import Any
 
 from hl_trading.book.l2 import PerpL2Book
 from hl_trading.domain import LimitOrderIntent, PortfolioView
+from hl_trading.services.portfolio import account_equity_usd
 
 logger = logging.getLogger(__name__)
 
@@ -60,30 +61,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None or raw.strip() == "":
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
-
-
-def _account_value_usd(margin: dict[str, Any]) -> float:
-    for key in ("accountValue", "account_value"):
-        v = margin.get(key)
-        if v is not None:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                continue
-    return 0.0
-
-
-def _account_value_from_portfolio(portfolio: PortfolioView) -> float:
-    """Prefer ``marginSummary``; fall back to ``crossMarginSummary`` (HL often fills one or the other)."""
-    av = _account_value_usd(portfolio.margin_summary)
-    if av > 0:
-        return av
-    raw = portfolio.raw if isinstance(portfolio.raw, dict) else {}
-    for key in ("crossMarginSummary", "marginSummary"):
-        m = raw.get(key)
-        if isinstance(m, dict):
-            av = max(av, _account_value_usd(m))
-    return av
 
 
 def _norm_side(s: Any) -> str:
@@ -186,7 +163,7 @@ class SolDepthStrategy:
         if mid is None:
             return []
 
-        av = _account_value_from_portfolio(portfolio)
+        av = account_equity_usd(portfolio)
         if av <= self._min_notional:
             if not self._warned_low_account:
                 logger.warning(

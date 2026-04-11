@@ -1,4 +1,4 @@
-"""Portfolio snapshot from REST `user_state` — extend with WS fills later."""
+"""Portfolio snapshot from REST — perp clearinghouse, spot clearinghouse (unified accounts), open orders."""
 
 from __future__ import annotations
 
@@ -10,6 +10,55 @@ from hyperliquid.info import Info
 from hl_trading.domain import PortfolioView
 
 logger = logging.getLogger(__name__)
+
+
+def _margin_account_value_usd(margin: dict[str, Any]) -> float:
+    for key in ("accountValue", "account_value"):
+        v = margin.get(key)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _spot_usdc_equity_usd(spot: dict[str, Any]) -> float:
+    """Unified / portfolio-margin accounts hold collateral in spot clearinghouse (HL docs)."""
+    balances = spot.get("balances") or []
+    for row in balances:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("coin", "")).upper() != "USDC":
+            continue
+        try:
+            return float(row.get("total", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def account_equity_usd(portfolio: PortfolioView) -> float:
+    """Best-effort USD equity for sizing and checks.
+
+    Standard accounts: ``marginSummary`` / ``crossMarginSummary`` from perp ``clearinghouseState``.
+
+    **Unified / portfolio margin:** perp user state is often all zeros; collateral lives in
+    ``spotClearinghouseState`` balances (see HL account abstraction docs).
+    """
+    raw = portfolio.raw if isinstance(portfolio.raw, dict) else {}
+    for key in ("marginSummary", "crossMarginSummary"):
+        m = raw.get(key)
+        if isinstance(m, dict):
+            v = _margin_account_value_usd(m)
+            if v > 0:
+                return v
+    spot = raw.get("spotClearinghouseState")
+    if isinstance(spot, dict):
+        v = _spot_usdc_equity_usd(spot)
+        if v > 0:
+            return v
+    return 0.0
 
 
 def _extract_positions(user_state: dict[str, Any]) -> dict[str, float]:
@@ -27,12 +76,21 @@ def _extract_positions(user_state: dict[str, Any]) -> dict[str, float]:
 
 
 def fetch_portfolio_view(info: Info, account_address: str, dex: str = "") -> PortfolioView:
-    """Merge ``clearinghouseState`` (user_state) with the dedicated ``openOrders`` info call.
+    """Merge perp ``clearinghouseState``, ``spotClearinghouseState`` (unified accounts), and ``open_orders``.
 
-    Hyperliquid's ``user_state`` / clearinghouse payload often **does not** include resting
-    orders; strategy dedup and risk need ``raw[\"openOrders\"]`` from ``open_orders()``."""
+    Hyperliquid's ``user_state`` often omits resting orders — we attach ``open_orders()``.
+
+    For **unified accounts**, balances used as perp collateral appear in **spot** clearinghouse;
+    perp ``marginSummary`` may be zeros — see ``account_equity_usd``."""
     raw_in = info.user_state(account_address, dex=dex)
     raw: dict[str, Any] = dict(raw_in) if isinstance(raw_in, dict) else {}
+
+    try:
+        spot_raw = info.spot_user_state(account_address)
+        if isinstance(spot_raw, dict):
+            raw["spotClearinghouseState"] = spot_raw
+    except Exception:
+        logger.exception("spot_user_state failed")
 
     try:
         oo = info.open_orders(account_address, dex=dex)
