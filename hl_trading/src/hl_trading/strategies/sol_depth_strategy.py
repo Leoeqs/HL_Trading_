@@ -18,7 +18,7 @@ Tune via environment variables (optional)::
     SOL_DEPTH_SELL_POS_PCT=0.01
     SOL_DEPTH_POSITION_CAP_PCT=0.10
     SOL_DEPTH_MAX_ORDERS_PER_BOOK=12
-    SOL_DEPTH_MIN_NOTIONAL_USD=5.0
+    SOL_DEPTH_MIN_NOTIONAL_USD=2.0
     SOL_DEPTH_DEBUG=0   # if 1, log throttled snapshot (av, szi, reduce_mode, intents)
 """
 
@@ -145,7 +145,7 @@ class SolDepthStrategy:
         self._sell_pos_pct = _env_float("SOL_DEPTH_SELL_POS_PCT", 0.01)
         self._pos_cap_pct = _env_float("SOL_DEPTH_POSITION_CAP_PCT", 0.10)
         self._max_orders = _env_int("SOL_DEPTH_MAX_ORDERS_PER_BOOK", 12)
-        self._min_notional = _env_float("SOL_DEPTH_MIN_NOTIONAL_USD", 5.0)
+        self._min_notional = _env_float("SOL_DEPTH_MIN_NOTIONAL_USD", 2.0)
         self._warned_reduce_mode = False
         self._warned_low_account = False
         self._warned_buy_clip_too_small = False
@@ -226,7 +226,7 @@ class SolDepthStrategy:
             if not self._warned_buy_clip_too_small:
                 logger.warning(
                     "SolDepthStrategy: each buy is %.2f%% of account ≈ %.2f USD, below SOL_DEPTH_MIN_NOTIONAL_USD=%.2f — "
-                    "no buys until equity is higher (~%.0f USD+ at 1%%/5 USD min) or lower SOL_DEPTH_MIN_NOTIONAL_USD / raise SOL_DEPTH_BUY_PCT",
+                    "no buys until equity is higher (~%.0f USD+ for this buy_pct vs min notional) or lower SOL_DEPTH_MIN_NOTIONAL_USD / raise SOL_DEPTH_BUY_PCT",
                     self._buy_pct * 100,
                     buy_clip_usd,
                     self._min_notional,
