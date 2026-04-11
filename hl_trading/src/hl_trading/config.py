@@ -90,6 +90,13 @@ class Settings(BaseSettings):
         description="Background REST refresh of user_state + open orders (0 = disable). Keeps risk/dedup aligned with exchange.",
     )
 
+    cancel_on_mid_drift_usd: float = Field(
+        default=0.05,
+        ge=0.0,
+        validation_alias=AliasChoices("HL_CANCEL_ON_MID_DRIFT_USD", "cancel_on_mid_drift_usd"),
+        description="Cancel resting limit orders when |L2 mid - limitPx| > this (USD). 0 disables.",
+    )
+
     def watch_coin_list(self) -> list[str]:
         parts = [x.strip() for x in self.watch_coins.split(",") if x.strip()]
         return parts or ["BTC"]

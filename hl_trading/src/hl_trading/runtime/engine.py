@@ -60,6 +60,7 @@ class TradingEngine:
         self._stop = threading.Event()
         self._l2_tick_count = 0
         self._last_l2_heartbeat_monotonic = 0.0
+        self._last_mid_drift_cancel_at = 0.0
 
     def refresh_portfolio(self) -> PortfolioView:
         portfolio = fetch_portfolio_view(self._info, self._settings.account_address)
@@ -107,6 +108,60 @@ class TradingEngine:
             except Exception:
                 logger.exception("execution failed for %s", intent)
 
+    def _cancel_orders_past_mid_drift(self, coin: str, book: PerpL2Book) -> None:
+        """Cancel resting limits when |mid - limitPx| exceeds configured USD drift (e.g. 0.05)."""
+        drift = self._settings.cancel_on_mid_drift_usd
+        if drift <= 0:
+            return
+        mid = book.mid()
+        if mid is None:
+            return
+        portfolio = self._current_portfolio()
+        if portfolio is None or not isinstance(portfolio.raw, dict):
+            return
+        stale: list[tuple[str, int]] = []
+        seen: set[int] = set()
+        for row in portfolio.raw.get("openOrders") or []:
+            if not isinstance(row, dict):
+                continue
+            o = row.get("order") if isinstance(row.get("order"), dict) else row
+            if not isinstance(o, dict):
+                continue
+            if str(o.get("coin", "")) != coin:
+                continue
+            try:
+                oid = int(o.get("oid", 0))
+                lp = float(o.get("limitPx", 0))
+            except (TypeError, ValueError):
+                continue
+            if oid <= 0 or oid in seen:
+                continue
+            if abs(mid - lp) > drift:
+                seen.add(oid)
+                stale.append((coin, oid))
+        if not stale:
+            return
+        now = time.monotonic()
+        if now - self._last_mid_drift_cancel_at < 0.15:
+            return
+        self._last_mid_drift_cancel_at = now
+        try:
+            self._exec.bulk_cancel_by_oid(stale)
+            logger.info(
+                "mid drift cancel: %d order(s) mid=%.4f drift_limit=%.2f oids=%s",
+                len(stale),
+                mid,
+                drift,
+                [oid for _c, oid in stale],
+            )
+        except Exception:
+            logger.exception("bulk_cancel failed")
+            return
+        try:
+            self.refresh_portfolio()
+        except Exception:
+            logger.exception("refresh_portfolio after mid-drift cancel failed")
+
     def _persist_fills(self, fills: list[dict[str, Any]]) -> None:
         store = self._hub.postgres_store if self._hub else None
         if not store or not fills:
@@ -148,6 +203,8 @@ class TradingEngine:
             if self._hub:
                 self._hub.on_l2_ws_message(ws_msg, ingest_ns)
                 self._hub.publish_book(coin, book.to_snapshot_payload())
+
+            self._cancel_orders_past_mid_drift(coin, book)
 
             portfolio = self._current_portfolio()
             if portfolio is None:
@@ -235,7 +292,7 @@ class TradingEngine:
                         logger.exception("update_leverage failed for %s", coin)
 
         logger.info(
-            "engine network=%s dry_run=%s l2=%s bbo=%s coins=%s fills_ws=%s order_updates=%s portfolio_refresh_s=%s",
+            "engine network=%s dry_run=%s l2=%s bbo=%s coins=%s fills_ws=%s order_updates=%s portfolio_refresh_s=%s cancel_mid_drift_usd=%s",
             self._settings.hl_network,
             self._settings.dry_run,
             self._settings.subscribe_l2,
@@ -244,6 +301,7 @@ class TradingEngine:
             self._settings.ingest_fills_ws,
             self._settings.track_order_updates,
             self._settings.portfolio_refresh_interval_sec,
+            self._settings.cancel_on_mid_drift_usd,
         )
         last_periodic_pf = time.monotonic()
         interval = self._settings.portfolio_refresh_interval_sec

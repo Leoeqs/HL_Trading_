@@ -115,3 +115,13 @@ class ExecutionService:
         if self._settings.dry_run:
             return None
         return response
+
+    def bulk_cancel_by_oid(self, cancels: list[tuple[str, int]]) -> Any:
+        """Cancel resting orders by (coin, exchange oid). No-op if empty."""
+        if not cancels:
+            return None
+        if self._settings.dry_run:
+            logger.info("[dry_run] would bulk_cancel %s", cancels)
+            return None
+        reqs: list[dict[str, Any]] = [{"coin": c, "oid": oid} for c, oid in cancels]
+        return self._exchange.bulk_cancel(reqs)
