@@ -77,6 +77,12 @@ class Settings(BaseSettings):
         description="`module.path:ClassName` for Strategy (no-arg ctor); unset = NullStrategy",
     )
 
+    initial_perp_leverage: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("HL_INITIAL_PERP_LEVERAGE", "initial_perp_leverage"),
+        description="If set, Exchange.update_leverage(leverage, coin, cross=True) once per watch coin at engine start (skip when dry_run)",
+    )
+
     def watch_coin_list(self) -> list[str]:
         parts = [x.strip() for x in self.watch_coins.split(",") if x.strip()]
         return parts or ["BTC"]
