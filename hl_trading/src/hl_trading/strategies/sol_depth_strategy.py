@@ -16,6 +16,12 @@ large asks. By default **new buys are paused** (``SOL_DEPTH_PAUSE_BUYS_WHEN_OVER
 When **short** and over the same cap: emit reduce-only **buys** on large bids. By default **new sells are
 paused** (``SOL_DEPTH_PAUSE_SELLS_WHEN_OVER_CAP``, default **true**).
 
+**Reduce vs opening (why sells can look “stuck”):** opening buys size off **equity** (large USD clip);
+reduce sells size off **``SOL_DEPTH_SELL_POS_PCT`` × position** (default 1%) — that notional can fall
+below ``SOL_DEPTH_MIN_NOTIONAL_USD`` unless we bump the clip. Reduce-only paths use the same wall-size
+threshold as opening (**``SOL_DEPTH_THRESHOLD_SOL``**, default **1000**), unless you set
+``SOL_DEPTH_REDUCE_THRESHOLD_SOL`` explicitly.
+
 With both sides active, ``SOL_DEPTH_MAX_ORDERS_PER_BOOK`` is split **50/50** between bid and ask intents
 (when not in a reduce-only regime).
 
@@ -161,6 +167,7 @@ class SolDepthStrategy:
 
     def __init__(self) -> None:
         self._threshold_sol = _env_float("SOL_DEPTH_THRESHOLD_SOL", 1000.0)
+        self._reduce_threshold_sol = _env_float("SOL_DEPTH_REDUCE_THRESHOLD_SOL", self._threshold_sol)
         self._near_mid_usd = _env_float("SOL_DEPTH_NEAR_MID_USD", 0.1)
         self._tick = _env_float("SOL_DEPTH_TICK", 0.001)
         self._sz_decimals = _env_int("SOL_DEPTH_SZ_DECIMALS", 2)
@@ -174,12 +181,27 @@ class SolDepthStrategy:
         self._min_notional = _env_float("SOL_DEPTH_MIN_NOTIONAL_USD", 2.0)
         self._warned_reduce_mode_long = False
         self._warned_reduce_mode_short = False
+        self._warned_reduce_no_liquidity_long = False
+        self._warned_reduce_no_liquidity_short = False
         self._warned_low_account = False
         self._warned_buy_clip_too_small = False
         self._warned_sell_clip_too_small = False
         self._debug = _env_bool("SOL_DEPTH_DEBUG", False)
         self._last_debug_log_m: float = 0.0
         self._last_strategy_diag_m: float = 0.0
+
+    def _reduce_clip_sol(self, szi: float, limit_px: float) -> float:
+        """SOL size for reduce-only orders; may exceed ``SOL_DEPTH_SELL_POS_PCT`` to satisfy min notional."""
+        cap = abs(szi)
+        if cap <= 0.0 or limit_px <= 0.0:
+            return 0.0
+        sz = _round_sz(self._sell_pos_pct * cap, self._sz_decimals)
+        if sz * limit_px < self._min_notional:
+            need_sol = self._min_notional / limit_px
+            sz = _round_sz(min(need_sol, cap), self._sz_decimals)
+        if sz <= 0.0 or sz * limit_px < self._min_notional - 1e-9:
+            return 0.0
+        return sz
 
     def on_bbo(self, coin: str, msg: Any, portfolio: PortfolioView) -> list[LimitOrderIntent]:
         return []
@@ -231,20 +253,19 @@ class SolDepthStrategy:
                         int(self._pos_cap_pct * 100),
                     )
                 self._warned_reduce_mode_short = True
+            n_short0 = len(out)
             for lvl in book.bids_desc():
                 if len(out) >= self._max_orders:
                     break
-                if lvl.sz < self._threshold_sol:
+                if lvl.sz < self._reduce_threshold_sol:
                     continue
                 if abs(lvl.px - mid) > self._near_mid_usd + 1e-9:
                     continue
                 limit_px = _round_px(lvl.px + self._tick, self._tick)
                 if limit_px <= 0:
                     continue
-                size = _round_sz(self._sell_pos_pct * abs(szi), self._sz_decimals)
+                size = self._reduce_clip_sol(szi, limit_px)
                 if size <= 0:
-                    continue
-                if size * limit_px < self._min_notional:
                     continue
                 if _has_open_limit(portfolio, COIN, "buy", limit_px, tick=self._tick):
                     continue
@@ -259,6 +280,15 @@ class SolDepthStrategy:
                     )
                 )
             if self._pause_sells_when_over_cap:
+                if len(out) == n_short0 and not self._warned_reduce_no_liquidity_short:
+                    logger.warning(
+                        "SolDepthStrategy: short reduce — **0 reduce-buy intents** (no bid ≥%.0f SOL within ±%.2f USD "
+                        "of mid, clips dust vs min notional, or resting orders at those prices). "
+                        "Try SOL_DEPTH_REDUCE_THRESHOLD_SOL lower, wider SOL_DEPTH_NEAR_MID_USD, or raise SOL_DEPTH_SELL_POS_PCT.",
+                        self._reduce_threshold_sol,
+                        self._near_mid_usd,
+                    )
+                    self._warned_reduce_no_liquidity_short = True
                 return out
 
         # --- Long over cap: chip away with reduce-only sells in front of large ask walls ---
@@ -279,20 +309,19 @@ class SolDepthStrategy:
                         int(self._pos_cap_pct * 100),
                     )
                 self._warned_reduce_mode_long = True
+            n_long0 = len(out)
             for lvl in book.asks_asc():
                 if len(out) >= self._max_orders:
                     break
-                if lvl.sz < self._threshold_sol:
+                if lvl.sz < self._reduce_threshold_sol:
                     continue
                 if abs(lvl.px - mid) > self._near_mid_usd + 1e-9:
                     continue
                 limit_px = _round_px(lvl.px - self._tick, self._tick)
                 if limit_px <= 0:
                     continue
-                size = _round_sz(self._sell_pos_pct * abs(szi), self._sz_decimals)
+                size = self._reduce_clip_sol(szi, limit_px)
                 if size <= 0:
-                    continue
-                if size * limit_px < self._min_notional:
                     continue
                 if _has_open_limit(portfolio, COIN, "sell", limit_px, tick=self._tick):
                     continue
@@ -307,6 +336,15 @@ class SolDepthStrategy:
                     )
                 )
             if self._pause_buys_when_over_cap:
+                if len(out) == n_long0 and not self._warned_reduce_no_liquidity_long:
+                    logger.warning(
+                        "SolDepthStrategy: long reduce — **0 reduce-sell intents** (no ask ≥%.0f SOL within ±%.2f USD "
+                        "of mid, clips dust vs min notional, or resting orders at those prices). "
+                        "Try SOL_DEPTH_REDUCE_THRESHOLD_SOL lower, wider SOL_DEPTH_NEAR_MID_USD, or raise SOL_DEPTH_SELL_POS_PCT.",
+                        self._reduce_threshold_sol,
+                        self._near_mid_usd,
+                    )
+                    self._warned_reduce_no_liquidity_long = True
                 return out
 
         buy_clip_usd = self._buy_pct * av

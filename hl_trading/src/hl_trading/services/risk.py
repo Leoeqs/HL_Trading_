@@ -57,6 +57,10 @@ class NotionalLimitRisk:
             raise RiskViolation(f"order notional {order_usd:.2f} > max_order_notional_usd {self._max_order}")
         if self._max_pos is None:
             return
+        # Opening-risk cap only: reduce-only orders shrink exposure but can leave |pos| above max until
+        # fully flattened — blocking them prevents rebalancing when already over the cap.
+        if intent.reduce_only:
+            return
         cur = float(p.positions.get(intent.coin, 0.0))
         pending_delta = self._pending_position_delta(p, intent.coin)
         signed_delta = intent.size if intent.side == "buy" else -intent.size
