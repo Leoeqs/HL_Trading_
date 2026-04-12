@@ -91,10 +91,13 @@ class Settings(BaseSettings):
     )
 
     cancel_on_mid_drift_usd: float = Field(
-        default=0.05,
+        default=0.0,
         ge=0.0,
         validation_alias=AliasChoices("HL_CANCEL_ON_MID_DRIFT_USD", "cancel_on_mid_drift_usd"),
-        description="Cancel resting limit orders when |L2 mid - limitPx| > this (USD). 0 disables.",
+        description=(
+            "Cancel resting limits when |L2 mid - limitPx| > this (USD). Default 0 (off): wall quotes "
+            "often sit >$0.05 from mid and would be canceled immediately. Set e.g. 0.15 if you want drift hygiene."
+        ),
     )
 
     def watch_coin_list(self) -> list[str]:

@@ -280,7 +280,7 @@ class SolDepthStrategy:
             n_qual, mx_qual = _qualifying_bids_in_band(
                 book, mid, threshold_sol=self._threshold_sol, near_mid_usd=self._near_mid_usd
             )
-            logger.info(
+            logger.debug(
                 "SolDepthStrategy: HL L2 depth ~%d bids / %d asks (API cap ~20/side); "
                 "±%.2f USD of mid: %d bid level(s) ≥%.0f SOL (max sz %.1f); equity ~%.2f USD; intents=%d",
                 db,

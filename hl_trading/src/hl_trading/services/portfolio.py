@@ -43,21 +43,27 @@ def account_equity_usd(portfolio: PortfolioView) -> float:
 
     Standard accounts: ``marginSummary`` / ``crossMarginSummary`` from perp ``clearinghouseState``.
 
-    **Unified / portfolio margin:** perp user state is often all zeros; collateral lives in
-    ``spotClearinghouseState`` balances (see HL account abstraction docs).
+    **Unified accounts:** perp ``accountValue`` can be a **subset** of total collateral while most
+    USDC still shows under ``spotClearinghouseState``. Taking only the first positive margin value
+    understates equity and makes ``pos_pct`` look ~100% with a small position — we use
+    ``max(perp, spot_usdc)`` when both are present.
     """
     raw = portfolio.raw if isinstance(portfolio.raw, dict) else {}
+    perp = 0.0
     for key in ("marginSummary", "crossMarginSummary"):
         m = raw.get(key)
         if isinstance(m, dict):
-            v = _margin_account_value_usd(m)
-            if v > 0:
-                return v
+            perp = max(perp, _margin_account_value_usd(m))
+    spot_v = 0.0
     spot = raw.get("spotClearinghouseState")
     if isinstance(spot, dict):
-        v = _spot_usdc_equity_usd(spot)
-        if v > 0:
-            return v
+        spot_v = _spot_usdc_equity_usd(spot)
+    if perp > 0.0 and spot_v > 0.0:
+        return max(perp, spot_v)
+    if perp > 0.0:
+        return perp
+    if spot_v > 0.0:
+        return spot_v
     return 0.0
 
 

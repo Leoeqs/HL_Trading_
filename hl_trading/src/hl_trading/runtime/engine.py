@@ -100,8 +100,6 @@ class TradingEngine:
         portfolio = self._current_portfolio()
         if portfolio is None:
             portfolio = self.refresh_portfolio()
-        if intents:
-            logger.info("dispatching %d order intent(s)", len(intents))
         for intent in intents:
             try:
                 self._exec.place_limit(portfolio, intent, mid_px=None)
@@ -147,13 +145,7 @@ class TradingEngine:
         self._last_mid_drift_cancel_at = now
         try:
             self._exec.bulk_cancel_by_oid(stale)
-            logger.info(
-                "mid drift cancel: %d order(s) mid=%.4f drift_limit=%.2f oids=%s",
-                len(stale),
-                mid,
-                drift,
-                [oid for _c, oid in stale],
-            )
+            logger.info("mid drift: canceled %d resting order(s)", len(stale))
         except Exception:
             logger.exception("bulk_cancel failed")
             return
@@ -216,7 +208,7 @@ class TradingEngine:
                 self._last_l2_heartbeat_monotonic = now
                 db, da = book.depth_levels()
                 bb = book.best_bid()
-                logger.info(
+                logger.debug(
                     "l2 heartbeat #%d coin=%s book_depth=%d/%d mid=%s best_bid=%s strategy_intents=%d",
                     self._l2_tick_count,
                     coin,

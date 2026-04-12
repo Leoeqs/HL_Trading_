@@ -52,15 +52,11 @@ class ExecutionService:
         exchange_oid: int | None = None
         error_message: str | None = None
 
+        _GREEN = "\033[92m"
+        _RST = "\033[0m"
+
         if self._settings.dry_run:
-            logger.info(
-                "[dry_run] would place %s %s %s @ %s ro=%s",
-                intent.side,
-                intent.size,
-                intent.coin,
-                intent.limit_px,
-                intent.reduce_only,
-            )
+            logger.info("%s[dry_run] order would be sent%s", _GREEN, _RST)
             normalized_status = "dry_run"
         else:
             is_buy = intent.side == "buy"
@@ -88,17 +84,12 @@ class ExecutionService:
             elif response.get("status") != "ok":
                 logger.warning("exchange HTTP response status=%s: %s", response.get("status"), response)
             normalized_status, exchange_oid, error_message = parse_order_placement_response(response)
-            logger.info(
-                "order %s %s %s @ %s ro=%s -> %s oid=%s err=%s",
-                intent.side,
-                intent.size,
-                intent.coin,
-                intent.limit_px,
-                intent.reduce_only,
-                normalized_status,
-                exchange_oid,
-                error_message,
-            )
+            if normalized_status in ("open", "filled"):
+                logger.info("%sorder placed ✓%s", _GREEN, _RST)
+            elif normalized_status in ("rejected", "error", "unknown"):
+                logger.warning("order rejected (%s) %s", normalized_status, error_message or "")
+            else:
+                logger.info("order result: %s", normalized_status)
 
         if self._journal:
             self._journal.enqueue_order_record(
