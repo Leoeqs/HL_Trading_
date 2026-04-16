@@ -83,6 +83,15 @@ class Settings(BaseSettings):
         description="If set, Exchange.update_leverage(leverage, coin, cross=True) once per watch coin at engine start (skip when dry_run)",
     )
 
+    perp_leverage_map: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("HL_PERP_LEVERAGE_MAP", "perp_leverage_map"),
+        description=(
+            "Optional per-coin leverage: comma-separated COIN=int, e.g. LIT=5,HYPE=10. "
+            "Takes precedence over initial_perp_leverage for listed symbols; others still use initial_perp_leverage."
+        ),
+    )
+
     portfolio_refresh_interval_sec: float = Field(
         default=3.0,
         ge=0.0,
@@ -103,6 +112,24 @@ class Settings(BaseSettings):
     def watch_coin_list(self) -> list[str]:
         parts = [x.strip() for x in self.watch_coins.split(",") if x.strip()]
         return parts or ["BTC"]
+
+    def leverage_for_coin(self, coin: str) -> int | None:
+        """Resolve cross leverage for a perp symbol; None means do not call update_leverage."""
+        c = str(coin).strip().upper()
+        raw = self.perp_leverage_map
+        if raw:
+            for part in raw.split(","):
+                chunk = part.strip()
+                if not chunk or "=" not in chunk:
+                    continue
+                sym, lev_s = chunk.split("=", 1)
+                if sym.strip().upper() != c:
+                    continue
+                try:
+                    return int(float(lev_s.strip()))
+                except ValueError:
+                    return None
+        return self.initial_perp_leverage
 
 
 @lru_cache

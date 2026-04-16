@@ -271,17 +271,18 @@ class TradingEngine:
         signal.signal(signal.SIGINT, _handle_sig)
         signal.signal(signal.SIGTERM, _handle_sig)
 
-        lev = self._settings.initial_perp_leverage
-        if lev is not None:
-            for coin in self._settings.watch_coin_list():
-                if self._settings.dry_run:
-                    logger.info("[dry_run] would set %s cross leverage to %sx", coin, lev)
-                else:
-                    try:
-                        self._exchange.update_leverage(lev, coin, True)
-                        logger.info("set %s cross leverage to %sx", coin, lev)
-                    except Exception:
-                        logger.exception("update_leverage failed for %s", coin)
+        for coin in self._settings.watch_coin_list():
+            lev = self._settings.leverage_for_coin(coin)
+            if lev is None:
+                continue
+            if self._settings.dry_run:
+                logger.info("[dry_run] would set %s cross leverage to %sx", coin, lev)
+            else:
+                try:
+                    self._exchange.update_leverage(lev, coin, True)
+                    logger.info("set %s cross leverage to %sx", coin, lev)
+                except Exception:
+                    logger.exception("update_leverage failed for %s", coin)
 
         logger.info(
             "engine network=%s dry_run=%s l2=%s bbo=%s coins=%s fills_ws=%s order_updates=%s portfolio_refresh_s=%s cancel_mid_drift_usd=%s",
