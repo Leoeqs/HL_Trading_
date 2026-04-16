@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from hl_trading import registry
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -17,7 +19,10 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    hl_network: Literal["mainnet", "testnet"] = "testnet"
+    hl_network: Literal["mainnet", "testnet"] = Field(
+        default=registry.DEFAULT_HL_NETWORK,
+        description="Hyperliquid cluster; registry default when HL_NETWORK unset",
+    )
     account_address: str = Field(
         ...,
         description="Main wallet address (0x...) for user_state and WS user channels",
@@ -28,8 +33,8 @@ class Settings(BaseSettings):
     )
 
     watch_coins: str = Field(
-        default="BTC",
-        description="Comma-separated perp symbols, e.g. BTC,ETH",
+        default_factory=registry.watch_coins_csv,
+        description="Comma-separated perp symbols; default from hl_trading.registry.WATCH_COINS",
     )
     dry_run: bool = True
 
@@ -72,9 +77,9 @@ class Settings(BaseSettings):
     )
 
     strategy_entrypoint: str | None = Field(
-        default=None,
+        default=registry.STRATEGY_ENTRYPOINT,
         validation_alias=AliasChoices("HL_STRATEGY", "strategy_entrypoint"),
-        description="`module.path:ClassName` for Strategy (no-arg ctor); unset = NullStrategy",
+        description="`module.path:ClassName` for Strategy (no-arg ctor); empty = NullStrategy; default from registry",
     )
 
     initial_perp_leverage: int | None = Field(
@@ -84,7 +89,7 @@ class Settings(BaseSettings):
     )
 
     perp_leverage_map: str | None = Field(
-        default=None,
+        default=registry.PERP_LEVERAGE_MAP,
         validation_alias=AliasChoices("HL_PERP_LEVERAGE_MAP", "perp_leverage_map"),
         description=(
             "Optional per-coin leverage: comma-separated COIN=int, e.g. LIT=5,HYPE=10. "
@@ -111,7 +116,7 @@ class Settings(BaseSettings):
 
     def watch_coin_list(self) -> list[str]:
         parts = [x.strip() for x in self.watch_coins.split(",") if x.strip()]
-        return parts or ["BTC"]
+        return parts or list(registry.WATCH_COINS)
 
     def leverage_for_coin(self, coin: str) -> int | None:
         """Resolve cross leverage for a perp symbol; None means do not call update_leverage."""
