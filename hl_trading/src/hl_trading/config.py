@@ -114,6 +114,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    cancel_resting_after_seconds: float = Field(
+        default=10.0,
+        ge=0.0,
+        validation_alias=AliasChoices("HL_CANCEL_RESTING_AFTER_SEC", "cancel_resting_after_seconds"),
+        description=(
+            "Cancel resting limits whose exchange `timestamp` is older than this many seconds vs local clock. "
+            "0 disables. Checked after each portfolio REST refresh (and on an auxiliary timer if refresh interval is 0)."
+        ),
+    )
+
     def watch_coin_list(self) -> list[str]:
         parts = [x.strip() for x in self.watch_coins.split(",") if x.strip()]
         return parts or list(registry.WATCH_COINS)

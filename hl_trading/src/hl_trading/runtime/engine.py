@@ -61,6 +61,8 @@ class TradingEngine:
         self._l2_tick_count = 0
         self._last_l2_heartbeat_monotonic = 0.0
         self._last_mid_drift_cancel_at = 0.0
+        self._last_stale_cancel_at = 0.0
+        self._last_stale_only_refresh_monotonic = 0.0
 
     def refresh_portfolio(self) -> PortfolioView:
         portfolio = fetch_portfolio_view(self._info, self._settings.account_address)
@@ -153,6 +155,60 @@ class TradingEngine:
             self.refresh_portfolio()
         except Exception:
             logger.exception("refresh_portfolio after mid-drift cancel failed")
+
+    def _cancel_stale_open_orders(self, portfolio: PortfolioView) -> None:
+        """Drop resting limits whose placement time (exchange ms timestamp) exceeds configured age."""
+        max_age = self._settings.cancel_resting_after_seconds
+        if max_age <= 0:
+            return
+        raw = portfolio.raw if isinstance(portfolio.raw, dict) else {}
+        orders = raw.get("openOrders") or []
+        now_ms = time.time() * 1000.0
+        threshold_ms = max_age * 1000.0
+        stale: list[tuple[str, int]] = []
+        seen: set[int] = set()
+        for row in orders:
+            if not isinstance(row, dict):
+                continue
+            o = row.get("order") if isinstance(row.get("order"), dict) else row
+            if not isinstance(o, dict):
+                continue
+            try:
+                oid = int(o.get("oid", 0))
+            except (TypeError, ValueError):
+                continue
+            if oid <= 0 or oid in seen:
+                continue
+            coin = str(o.get("coin", "")).strip()
+            if not coin:
+                continue
+            ts = o.get("timestamp", o.get("time"))
+            if ts is None:
+                continue
+            try:
+                ts_ms = int(float(ts))
+            except (TypeError, ValueError):
+                continue
+            if now_ms - float(ts_ms) < threshold_ms:
+                continue
+            seen.add(oid)
+            stale.append((coin, oid))
+        if not stale:
+            return
+        now = time.monotonic()
+        if now - self._last_stale_cancel_at < 0.15:
+            return
+        self._last_stale_cancel_at = now
+        try:
+            self._exec.bulk_cancel_by_oid(stale)
+            logger.info("stale resting: canceled %d order(s) older than %.1fs", len(stale), max_age)
+        except Exception:
+            logger.exception("bulk_cancel stale failed")
+            return
+        try:
+            self.refresh_portfolio()
+        except Exception:
+            logger.exception("refresh_portfolio after stale cancel failed")
 
     def _persist_fills(self, fills: list[dict[str, Any]]) -> None:
         store = self._hub.postgres_store if self._hub else None
@@ -285,7 +341,7 @@ class TradingEngine:
                     logger.exception("update_leverage failed for %s", coin)
 
         logger.info(
-            "engine network=%s dry_run=%s l2=%s bbo=%s coins=%s fills_ws=%s order_updates=%s portfolio_refresh_s=%s cancel_mid_drift_usd=%s",
+            "engine network=%s dry_run=%s l2=%s bbo=%s coins=%s fills_ws=%s order_updates=%s portfolio_refresh_s=%s cancel_mid_drift_usd=%s cancel_resting_after_s=%s",
             self._settings.hl_network,
             self._settings.dry_run,
             self._settings.subscribe_l2,
@@ -295,17 +351,33 @@ class TradingEngine:
             self._settings.track_order_updates,
             self._settings.portfolio_refresh_interval_sec,
             self._settings.cancel_on_mid_drift_usd,
+            self._settings.cancel_resting_after_seconds,
         )
         last_periodic_pf = time.monotonic()
         interval = self._settings.portfolio_refresh_interval_sec
+        stale_after = self._settings.cancel_resting_after_seconds
+        stale_aux_interval = (
+            min(5.0, max(1.0, stale_after / 2.0)) if stale_after and stale_after > 0 and interval <= 0 else 0.0
+        )
         while not self._stop.is_set():
             time.sleep(0.5)
-            if interval > 0 and time.monotonic() - last_periodic_pf >= interval:
-                last_periodic_pf = time.monotonic()
+            now_loop = time.monotonic()
+            if interval > 0 and now_loop - last_periodic_pf >= interval:
+                last_periodic_pf = now_loop
                 try:
-                    self.refresh_portfolio()
+                    pf = self.refresh_portfolio()
+                    if stale_after and stale_after > 0:
+                        self._cancel_stale_open_orders(pf)
                 except Exception:
                     logger.exception("periodic portfolio refresh failed")
+            elif stale_aux_interval > 0 and now_loop - self._last_stale_only_refresh_monotonic >= stale_aux_interval:
+                self._last_stale_only_refresh_monotonic = now_loop
+                try:
+                    pf = self.refresh_portfolio()
+                    if stale_after and stale_after > 0:
+                        self._cancel_stale_open_orders(pf)
+                except Exception:
+                    logger.exception("stale-cancel auxiliary portfolio refresh failed")
         if self._hub:
             self._hub.shutdown()
         if self._info.ws_manager:
