@@ -19,7 +19,7 @@ from hl_trading.pnl.rollup import rollup_pnl_daily
 from hl_trading.reconcile.reconciler import run_reconcile_once
 from hl_trading.replay.replay_runner import replay_file
 from hl_trading.runtime.engine import run_default_engine
-from hl_trading.services.actor_analysis import analyze_actor_ndjson, format_actor_analysis
+from hl_trading.services.actor_analysis import analyze_actor_ndjson, format_actor_analysis, format_actor_strategy_report
 from hl_trading.services.actor_watch import LargeTradeActorWatcher
 from hl_trading.services.portfolio import fetch_portfolio_view
 from hl_trading.strategies.loader import load_strategy
@@ -82,6 +82,7 @@ def main() -> None:
         default="attention",
         help="Ranking score to use for text output",
     )
+    p_aa.add_argument("--report", action="store_true", help="Emit compact trading-oriented sections")
     p_aa.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     p_aa.set_defaults(fn=_cmd_analyze_actors)
 
@@ -159,6 +160,9 @@ def _cmd_analyze_actors(args: argparse.Namespace) -> None:
     if args.json:
         json.dump(result.to_record(top=args.top), sys.stdout, indent=2)
         sys.stdout.write("\n")
+        return
+    if args.report:
+        print(format_actor_strategy_report(result, top=args.top))
         return
     print(format_actor_analysis(result, top=args.top, sort_by=args.sort_by))
 

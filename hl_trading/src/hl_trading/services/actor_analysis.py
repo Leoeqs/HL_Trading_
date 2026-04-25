@@ -255,6 +255,33 @@ def format_actor_analysis(result: ActorAnalysisResult, *, top: int = 20, sort_by
     return "\n".join(lines)
 
 
+def format_actor_strategy_report(result: ActorAnalysisResult, *, top: int = 5) -> str:
+    """Human-readable research report for trading review."""
+    counts = Counter(w.archetype for w in result.wallets)
+    lines = [
+        f"Actor strategy report: {result.path}",
+        (
+            f"records={result.line_count:,} invalid={result.invalid_line_count:,} "
+            f"large_trades={result.large_trade_count:,} snapshots={result.wallet_snapshot_count:,} "
+            f"features={result.behavior_feature_count:,} wallets={len(result.wallets):,}"
+        ),
+        (
+            "archetypes="
+            + ", ".join(f"{name}:{counts.get(name, 0)}" for name in ("market_maker", "mixed", "directional", "unknown"))
+        ),
+        "",
+        "Market Makers To Watch",
+    ]
+    lines.extend(_format_wallet_section(_top_wallets(result.wallets, "market_maker", "market-maker", top)))
+    lines.extend(["", "Mixed Liquidity/Flow Actors"])
+    lines.extend(_format_wallet_section(_top_wallets(result.wallets, "mixed", "attention", top)))
+    lines.extend(["", "Directional Wallets To Watch"])
+    lines.extend(_format_wallet_section(_top_wallets(result.wallets, "directional", "directional", top)))
+    lines.extend(["", "Trading Read"])
+    lines.extend(_format_trading_read(result.wallets))
+    return "\n".join(lines)
+
+
 def _sorted_wallets(wallets: list[WalletActorSummary], sort_by: str) -> list[WalletActorSummary]:
     if sort_by == "market-maker":
         key = lambda s: s.market_maker_score
@@ -263,6 +290,82 @@ def _sorted_wallets(wallets: list[WalletActorSummary], sort_by: str) -> list[Wal
     else:
         key = lambda s: s.attention_score
     return sorted(wallets, key=key, reverse=True)
+
+
+def _top_wallets(
+    wallets: list[WalletActorSummary],
+    archetype: str,
+    sort_by: str,
+    top: int,
+) -> list[WalletActorSummary]:
+    matching = [w for w in wallets if w.archetype == archetype]
+    return _sorted_wallets(matching, sort_by)[:top]
+
+
+def _format_wallet_section(wallets: list[WalletActorSummary]) -> list[str]:
+    if not wallets:
+        return ["  none"]
+    lines: list[str] = []
+    for idx, wallet in enumerate(wallets, start=1):
+        lines.append(
+            "  "
+            f"{idx}. {_short_wallet(wallet.account)} "
+            f"score={wallet.attention_score:.1f} "
+            f"mm={wallet.market_maker_score:.1f} "
+            f"dir={wallet.directional_score:.1f} "
+            f"trades={wallet.trade_count} "
+            f"notional={_fmt_usd(wallet.trade_notional_usd)}"
+        )
+        lines.append(
+            "     "
+            f"open={wallet.latest_open_order_count} "
+            f"bid={_fmt_usd(wallet.latest_bid_notional_usd)} "
+            f"ask={_fmt_usd(wallet.latest_ask_notional_usd)} "
+            f"replaces={wallet.total_possible_replace_count:,} "
+            f"refresh={wallet.avg_quote_refresh_score:.2f} "
+            f"balance={wallet.two_sided_balance:.2f}"
+        )
+        lines.append(f"     positions={_format_positions(wallet.latest_positions)}")
+    return lines
+
+
+def _format_trading_read(wallets: list[WalletActorSummary]) -> list[str]:
+    directional = _top_wallets(wallets, "directional", "directional", 3)
+    market_makers = _top_wallets(wallets, "market_maker", "market-maker", 3)
+    mixed = _top_wallets(wallets, "mixed", "attention", 3)
+    lines = [
+        "- Treat market_maker wallets as liquidity-map inputs: watch bid/ask reloads, pulls, and imbalance changes.",
+        "- Treat directional wallets as flow/position inputs: watch whether their LIT exposure grows, flips, or unwinds.",
+        "- Treat mixed wallets carefully: they may be market makers with inventory, not pure directional conviction.",
+    ]
+    if market_makers:
+        names = ", ".join(_short_wallet(w.account) for w in market_makers)
+        lines.append(f"- Top liquidity actors right now: {names}.")
+    if directional:
+        names = ", ".join(_short_wallet(w.account) for w in directional)
+        lines.append(f"- Top directional candidates right now: {names}.")
+    if mixed:
+        names = ", ".join(_short_wallet(w.account) for w in mixed)
+        lines.append(f"- Top mixed actors right now: {names}.")
+    return lines
+
+
+def _short_wallet(account: str) -> str:
+    if len(account) <= 12:
+        return account
+    return f"{account[:8]}...{account[-6:]}"
+
+
+def _fmt_usd(value: float) -> str:
+    abs_v = abs(value)
+    sign = "-" if value < 0 else ""
+    if abs_v >= 1_000_000_000:
+        return f"{sign}${abs_v / 1_000_000_000:.2f}B"
+    if abs_v >= 1_000_000:
+        return f"{sign}${abs_v / 1_000_000:.2f}M"
+    if abs_v >= 1_000:
+        return f"{sign}${abs_v / 1_000:.1f}K"
+    return f"{sign}${abs_v:.0f}"
 
 
 def _summary_for(summaries: dict[str, WalletActorSummary], account: str) -> WalletActorSummary:
