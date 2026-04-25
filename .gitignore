@@ -30,3 +30,6 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# Local captures (e.g. hl-trade watch-actors --output)
+hl_trading/data/

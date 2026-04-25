@@ -33,6 +33,13 @@ class MarketDataService:
         logger.info("subscribed l2Book coin=%s id=%s", coin, sid)
         return sid
 
+    def subscribe_trades(self, coin: str, on_message: WsCallback) -> int:
+        sub: Subscription = {"type": "trades", "coin": coin}
+        sid = self._info.subscribe(sub, on_message)
+        self._sub_ids.append(sid)
+        logger.info("subscribed trades coin=%s id=%s", coin, sid)
+        return sid
+
     def subscribe_user_events(self, user: str, on_message: WsCallback) -> int:
         sub: Subscription = {"type": "userEvents", "user": user}
         sid = self._info.subscribe(sub, on_message)
