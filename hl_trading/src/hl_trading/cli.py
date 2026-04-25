@@ -69,6 +69,12 @@ def main() -> None:
     p_aa = sub.add_parser("analyze-actors", help="Summarize actor-watch NDJSON by wallet")
     p_aa.add_argument("ndjson", type=Path, help="Path to actor-watch NDJSON")
     p_aa.add_argument("--top", type=int, default=20, help="Number of wallets to show")
+    p_aa.add_argument(
+        "--sort-by",
+        choices=["attention", "market-maker", "directional"],
+        default="attention",
+        help="Ranking score to use for text output",
+    )
     p_aa.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     p_aa.set_defaults(fn=_cmd_analyze_actors)
 
@@ -145,7 +151,7 @@ def _cmd_analyze_actors(args: argparse.Namespace) -> None:
         json.dump(result.to_record(top=args.top), sys.stdout, indent=2)
         sys.stdout.write("\n")
         return
-    print(format_actor_analysis(result, top=args.top))
+    print(format_actor_analysis(result, top=args.top, sort_by=args.sort_by))
 
 
 if __name__ == "__main__":

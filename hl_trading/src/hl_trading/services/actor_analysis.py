@@ -59,20 +59,71 @@ class WalletActorSummary:
         return self.size_repetition_score_sum / self.feature_count if self.feature_count else 0.0
 
     @property
+    def visible_liquidity_usd(self) -> float:
+        return self.latest_bid_notional_usd + self.latest_ask_notional_usd
+
+    @property
+    def two_sided_balance(self) -> float:
+        if self.visible_liquidity_usd <= 0.0:
+            return 0.0
+        return min(self.latest_bid_notional_usd, self.latest_ask_notional_usd) / max(
+            self.latest_bid_notional_usd,
+            self.latest_ask_notional_usd,
+        )
+
+    @property
+    def traded_coin_abs_position(self) -> float:
+        coins = set(self.coins)
+        return sum(abs(size) for coin, size in self.latest_positions.items() if coin in coins)
+
+    @property
+    def market_maker_score(self) -> float:
+        """Ranks wallets with broad two-sided quoting and frequent order refreshes."""
+        return (
+            self.max_open_order_count * 0.5
+            + self.visible_liquidity_usd / 100_000.0
+            + self.two_sided_balance * 25.0
+            + self.total_possible_replace_count * 1.5
+            + self.avg_quote_refresh_score * 20.0
+        )
+
+    @property
+    def directional_score(self) -> float:
+        """Ranks wallets that appear more position/flow driven than quote-inventory driven."""
+        low_order_bonus = 20.0 if self.latest_open_order_count <= 50 else 0.0
+        active_position_bonus = min(self.traded_coin_abs_position / 1_000.0, 100.0)
+        return (
+            self.trade_count * 5.0
+            + self.trade_notional_usd / 1_000.0
+            + active_position_bonus
+            + low_order_bonus
+            + self.avg_size_repetition_score * 10.0
+        )
+
+    @property
+    def archetype(self) -> str:
+        mm = self.market_maker_score
+        directional = self.directional_score
+        if mm >= 100.0 and directional >= 30.0:
+            return "mixed"
+        if mm >= 100.0:
+            return "market_maker"
+        if directional >= 30.0:
+            return "directional"
+        return "unknown"
+
+    @property
     def attention_score(self) -> float:
         """Heuristic ranker for manual review, not a trading signal."""
-        return (
-            self.trade_count * 3.0
-            + self.trade_notional_usd / 10_000.0
-            + self.total_possible_replace_count * 2.0
-            + self.avg_quote_refresh_score * 5.0
-            + self.max_open_order_count * 0.5
-        )
+        return max(self.market_maker_score, self.directional_score)
 
     def to_record(self) -> dict[str, Any]:
         return {
             "account": self.account,
+            "archetype": self.archetype,
             "attention_score": self.attention_score,
+            "market_maker_score": self.market_maker_score,
+            "directional_score": self.directional_score,
             "trade_count": self.trade_count,
             "trade_notional_usd": self.trade_notional_usd,
             "side_counts": dict(self.side_counts),
@@ -87,6 +138,9 @@ class WalletActorSummary:
             "latest_open_order_count": self.latest_open_order_count,
             "latest_bid_notional_usd": self.latest_bid_notional_usd,
             "latest_ask_notional_usd": self.latest_ask_notional_usd,
+            "visible_liquidity_usd": self.visible_liquidity_usd,
+            "two_sided_balance": self.two_sided_balance,
+            "traded_coin_abs_position": self.traded_coin_abs_position,
             "feature_count": self.feature_count,
             "total_added_order_count": self.total_added_order_count,
             "total_removed_order_count": self.total_removed_order_count,
@@ -168,7 +222,8 @@ def analyze_actor_ndjson(path: str | Path) -> ActorAnalysisResult:
     )
 
 
-def format_actor_analysis(result: ActorAnalysisResult, *, top: int = 20) -> str:
+def format_actor_analysis(result: ActorAnalysisResult, *, top: int = 20, sort_by: str = "attention") -> str:
+    wallets = _sorted_wallets(result.wallets, sort_by)
     lines = [
         f"Actor analysis: {result.path}",
         (
@@ -177,13 +232,16 @@ def format_actor_analysis(result: ActorAnalysisResult, *, top: int = 20) -> str:
             f"features={result.behavior_feature_count} wallets={len(result.wallets)}"
         ),
         "",
-        "rank score wallet                                     trades notional_usd open bid_usd ask_usd repl q_refresh size_rep pos",
+        "rank type          score     mm    dir wallet                                     trades notional_usd open bid_usd ask_usd repl q_refresh pos",
     ]
-    for idx, wallet in enumerate(result.wallets[:top], start=1):
+    for idx, wallet in enumerate(wallets[:top], start=1):
         pos = _format_positions(wallet.latest_positions)
         lines.append(
             f"{idx:>4} "
-            f"{wallet.attention_score:>5.1f} "
+            f"{wallet.archetype:<13} "
+            f"{wallet.attention_score:>7.1f} "
+            f"{wallet.market_maker_score:>6.1f} "
+            f"{wallet.directional_score:>6.1f} "
             f"{wallet.account:<42} "
             f"{wallet.trade_count:>6} "
             f"{wallet.trade_notional_usd:>12.0f} "
@@ -192,10 +250,19 @@ def format_actor_analysis(result: ActorAnalysisResult, *, top: int = 20) -> str:
             f"{wallet.latest_ask_notional_usd:>7.0f} "
             f"{wallet.total_possible_replace_count:>4} "
             f"{wallet.avg_quote_refresh_score:>9.2f} "
-            f"{wallet.avg_size_repetition_score:>8.2f} "
             f"{pos}"
         )
     return "\n".join(lines)
+
+
+def _sorted_wallets(wallets: list[WalletActorSummary], sort_by: str) -> list[WalletActorSummary]:
+    if sort_by == "market-maker":
+        key = lambda s: s.market_maker_score
+    elif sort_by == "directional":
+        key = lambda s: s.directional_score
+    else:
+        key = lambda s: s.attention_score
+    return sorted(wallets, key=key, reverse=True)
 
 
 def _summary_for(summaries: dict[str, WalletActorSummary], account: str) -> WalletActorSummary:
