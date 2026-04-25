@@ -183,6 +183,8 @@ class LargeTradeActorWatcher:
         wallet_poll_interval_s: float = 5.0,
         auto_track_trade_wallets: bool = True,
         max_tracked_wallets: int = 100,
+        include_backfill: bool = False,
+        initial_backfill_grace_s: float = 10.0,
         output_path: str | None = None,
         dex: str = "",
     ) -> None:
@@ -194,9 +196,12 @@ class LargeTradeActorWatcher:
         self._wallet_poll_interval_s = wallet_poll_interval_s
         self._auto_track_trade_wallets = auto_track_trade_wallets
         self._max_tracked_wallets = max_tracked_wallets
+        self._include_backfill = include_backfill
+        self._live_after_ms = _now_ms() - int(initial_backfill_grace_s * 1000)
         self._output_path = output_path
         self._dex = dex
         self._trade_q: queue.Queue[LargeTradeEvent] = queue.Queue(maxsize=10_000)
+        self._seen_trade_keys: set[str] = set()
         self._previous_snapshots: dict[str, WalletSnapshot] = {}
 
     def run(self, *, duration_s: float | None = None) -> None:
@@ -240,6 +245,15 @@ class LargeTradeActorWatcher:
                 logger.error("large trade queue full; dropping hash=%s", event.hash)
 
     def _parse_large_trade(self, trade: dict[str, Any]) -> LargeTradeEvent | None:
+        trade_key = _trade_key(trade)
+        if trade_key in self._seen_trade_keys:
+            return None
+        self._seen_trade_keys.add(trade_key)
+
+        exchange_time_ms = _as_int(trade.get("time"))
+        if not self._include_backfill and exchange_time_ms and exchange_time_ms < self._live_after_ms:
+            return None
+
         px = _as_float(trade.get("px"))
         sz = _as_float(trade.get("sz"))
         notional = abs(px * sz)
@@ -254,7 +268,7 @@ class LargeTradeActorWatcher:
             px=px,
             sz=sz,
             notional_usd=notional,
-            exchange_time_ms=_as_int(trade.get("time")),
+            exchange_time_ms=exchange_time_ms,
             hash=str(trade.get("hash", "")),
             wallets=tuple(_extract_wallets_from_trade(trade)),
             raw=dict(trade),
@@ -367,6 +381,16 @@ def _extract_wallets_from_trade(trade: dict[str, Any]) -> list[str]:
     if isinstance(users, list):
         wallets.extend(str(u).lower() for u in users if isinstance(u, str) and u.startswith("0x"))
     return sorted(set(wallets))
+
+
+def _trade_key(trade: dict[str, Any]) -> str:
+    hash_v = trade.get("hash")
+    if hash_v:
+        return f"hash:{hash_v}"
+    tid = trade.get("tid")
+    if tid:
+        return f"tid:{tid}"
+    return f"raw:{trade.get('coin')}:{trade.get('time')}:{trade.get('side')}:{trade.get('px')}:{trade.get('sz')}"
 
 
 def _is_bid(side: str) -> bool:

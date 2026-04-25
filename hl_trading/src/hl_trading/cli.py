@@ -62,6 +62,13 @@ def main() -> None:
     p_aw.add_argument("--wallet-poll-sec", type=float, default=5.0, help="REST polling cadence for tracked wallets")
     p_aw.add_argument("--max-wallets", type=int, default=100, help="Maximum wallets to auto-track from trade payloads")
     p_aw.add_argument("--no-auto-track", action="store_true", help="Only poll wallets passed with --track-wallet")
+    p_aw.add_argument("--include-backfill", action="store_true", help="Record recent trades sent on websocket subscribe")
+    p_aw.add_argument(
+        "--initial-backfill-grace-sec",
+        type=float,
+        default=10.0,
+        help="Live-only mode still accepts trades this many seconds before startup",
+    )
     p_aw.add_argument("--output", default=None, help="Append NDJSON records to this path; stdout if omitted")
     p_aw.add_argument("--duration-sec", type=float, default=None, help="Optional finite run duration")
     p_aw.set_defaults(fn=_cmd_watch_actors)
@@ -137,6 +144,8 @@ def _cmd_watch_actors(args: argparse.Namespace) -> None:
         wallet_poll_interval_s=args.wallet_poll_sec,
         auto_track_trade_wallets=not args.no_auto_track,
         max_tracked_wallets=args.max_wallets,
+        include_backfill=args.include_backfill,
+        initial_backfill_grace_s=args.initial_backfill_grace_sec,
         output_path=args.output,
     )
     try:
