@@ -282,6 +282,39 @@ def format_actor_strategy_report(result: ActorAnalysisResult, *, top: int = 5) -
     return "\n".join(lines)
 
 
+def select_watchlist_wallets(
+    result: ActorAnalysisResult,
+    *,
+    top_per_archetype: int = 5,
+    archetypes: tuple[str, ...] = ("market_maker", "mixed", "directional"),
+) -> list[str]:
+    """Return de-duplicated wallet addresses worth pinning in future collection."""
+    selected: list[str] = []
+    seen: set[str] = set()
+    sort_by_for_type = {
+        "market_maker": "market-maker",
+        "mixed": "attention",
+        "directional": "directional",
+        "unknown": "attention",
+    }
+    for archetype in archetypes:
+        sort_by = sort_by_for_type.get(archetype, "attention")
+        for wallet in _top_wallets(result.wallets, archetype, sort_by, top_per_archetype):
+            if wallet.account in seen:
+                continue
+            selected.append(wallet.account)
+            seen.add(wallet.account)
+    return selected
+
+
+def write_watchlist(path: str | Path, wallets: list[str]) -> None:
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    with path_obj.open("w", encoding="utf-8") as fh:
+        for wallet in wallets:
+            fh.write(wallet + "\n")
+
+
 def _sorted_wallets(wallets: list[WalletActorSummary], sort_by: str) -> list[WalletActorSummary]:
     if sort_by == "market-maker":
         key = lambda s: s.market_maker_score

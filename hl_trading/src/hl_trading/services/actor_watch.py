@@ -190,7 +190,8 @@ class LargeTradeActorWatcher:
     ) -> None:
         self._info = info
         self._md = MarketDataService(info)
-        self._coins = [c.strip().upper() for c in coins if c.strip()]
+        self._coins = [c.strip() for c in coins if c.strip()]
+        self._coin_filter = {c.upper() for c in self._coins}
         self._min_notional_usd = min_notional_usd
         self._tracked_wallets = {w.lower() for w in tracked_wallets or [] if w}
         self._wallet_poll_interval_s = wallet_poll_interval_s
@@ -259,8 +260,8 @@ class LargeTradeActorWatcher:
         notional = abs(px * sz)
         if notional < self._min_notional_usd:
             return None
-        coin = str(trade.get("coin", "")).upper()
-        if self._coins and coin not in self._coins:
+        coin = str(trade.get("coin", ""))
+        if self._coin_filter and coin.upper() not in self._coin_filter:
             return None
         return LargeTradeEvent(
             coin=coin,

@@ -19,7 +19,13 @@ from hl_trading.pnl.rollup import rollup_pnl_daily
 from hl_trading.reconcile.reconciler import run_reconcile_once
 from hl_trading.replay.replay_runner import replay_file
 from hl_trading.runtime.engine import run_default_engine
-from hl_trading.services.actor_analysis import analyze_actor_ndjson, format_actor_analysis, format_actor_strategy_report
+from hl_trading.services.actor_analysis import (
+    analyze_actor_ndjson,
+    format_actor_analysis,
+    format_actor_strategy_report,
+    select_watchlist_wallets,
+    write_watchlist,
+)
 from hl_trading.services.actor_watch import LargeTradeActorWatcher
 from hl_trading.services.portfolio import fetch_portfolio_view
 from hl_trading.strategies.loader import load_strategy
@@ -51,6 +57,8 @@ def main() -> None:
 
     p_aw = sub.add_parser("watch-actors", help="Watch large trades and snapshot tracked wallets")
     p_aw.add_argument("--coins", default=None, help="Comma-separated perps; defaults to WATCH_COINS")
+    p_aw.add_argument("--all-perps", action="store_true", help="Subscribe to trades for every perp in Hyperliquid meta")
+    p_aw.add_argument("--exclude-coins", default="", help="Comma-separated perps to skip with --all-perps")
     p_aw.add_argument("--network", choices=["mainnet", "testnet"], default=None, help="Defaults to HL_NETWORK or registry")
     p_aw.add_argument("--min-notional", type=float, default=25_000.0, help="Large-trade threshold in USD")
     p_aw.add_argument(
@@ -58,6 +66,12 @@ def main() -> None:
         action="append",
         default=[],
         help="Wallet to poll for positions/open orders; repeat for multiple wallets",
+    )
+    p_aw.add_argument(
+        "--track-wallet-file",
+        type=Path,
+        default=None,
+        help="File of wallet addresses to poll, one per line",
     )
     p_aw.add_argument("--wallet-poll-sec", type=float, default=5.0, help="REST polling cadence for tracked wallets")
     p_aw.add_argument("--max-wallets", type=int, default=100, help="Maximum wallets to auto-track from trade payloads")
@@ -83,6 +97,12 @@ def main() -> None:
         help="Ranking score to use for text output",
     )
     p_aa.add_argument("--report", action="store_true", help="Emit compact trading-oriented sections")
+    p_aa.add_argument("--export-watchlist", type=Path, default=None, help="Write selected wallet addresses to this file")
+    p_aa.add_argument(
+        "--watchlist-archetypes",
+        default="market_maker,mixed,directional",
+        help="Comma-separated archetypes for --export-watchlist",
+    )
     p_aa.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     p_aa.set_defaults(fn=_cmd_analyze_actors)
 
@@ -135,13 +155,22 @@ def _cmd_watch_actors(args: argparse.Namespace) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     network = args.network or os.getenv("HL_NETWORK") or registry.DEFAULT_HL_NETWORK
     base_url = constants.MAINNET_API_URL if network == "mainnet" else constants.TESTNET_API_URL
-    coins = [x.strip() for x in args.coins.split(",") if x.strip()] if args.coins else list(registry.WATCH_COINS)
     info = Info(base_url, skip_ws=False)
+    if args.all_perps:
+        coins = _fetch_all_perp_coins(info)
+        exclude = {x.strip().upper() for x in args.exclude_coins.split(",") if x.strip()}
+        if exclude:
+            coins = [c for c in coins if c.upper() not in exclude]
+    else:
+        coins = [x.strip() for x in args.coins.split(",") if x.strip()] if args.coins else list(registry.WATCH_COINS)
+    tracked_wallets = list(args.track_wallet)
+    if args.track_wallet_file is not None:
+        tracked_wallets.extend(_read_wallet_file(args.track_wallet_file))
     watcher = LargeTradeActorWatcher(
         info,
         coins=coins,
         min_notional_usd=args.min_notional,
-        tracked_wallets=args.track_wallet,
+        tracked_wallets=tracked_wallets,
         wallet_poll_interval_s=args.wallet_poll_sec,
         auto_track_trade_wallets=not args.no_auto_track,
         max_tracked_wallets=args.max_wallets,
@@ -157,6 +186,11 @@ def _cmd_watch_actors(args: argparse.Namespace) -> None:
 
 def _cmd_analyze_actors(args: argparse.Namespace) -> None:
     result = analyze_actor_ndjson(args.ndjson)
+    if args.export_watchlist is not None:
+        archetypes = tuple(x.strip() for x in args.watchlist_archetypes.split(",") if x.strip())
+        wallets = select_watchlist_wallets(result, top_per_archetype=args.top, archetypes=archetypes)
+        write_watchlist(args.export_watchlist, wallets)
+        print(f"wrote {len(wallets)} wallet(s) to {args.export_watchlist}", file=sys.stderr)
     if args.json:
         json.dump(result.to_record(top=args.top), sys.stdout, indent=2)
         sys.stdout.write("\n")
@@ -165,6 +199,36 @@ def _cmd_analyze_actors(args: argparse.Namespace) -> None:
         print(format_actor_strategy_report(result, top=args.top))
         return
     print(format_actor_analysis(result, top=args.top, sort_by=args.sort_by))
+
+
+def _read_wallet_file(path: Path) -> list[str]:
+    wallets: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
+        wallets.append(value)
+    return wallets
+
+
+def _fetch_all_perp_coins(info: Info) -> list[str]:
+    meta = info.meta()
+    universe = meta.get("universe") if isinstance(meta, dict) else None
+    if not isinstance(universe, list):
+        raise RuntimeError("Hyperliquid meta response did not contain universe")
+    coins: list[str] = []
+    for asset in universe:
+        if not isinstance(asset, dict):
+            continue
+        name = asset.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if asset.get("isDelisted") is True:
+            continue
+        coins.append(name)
+    if not coins:
+        raise RuntimeError("Hyperliquid meta universe was empty")
+    return coins
 
 
 if __name__ == "__main__":
