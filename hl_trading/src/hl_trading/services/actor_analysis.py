@@ -77,6 +77,33 @@ class WalletActorSummary:
         return sum(abs(size) for coin, size in self.latest_positions.items() if coin in coins)
 
     @property
+    def active_position_count(self) -> int:
+        return sum(1 for size in self.latest_positions.values() if abs(size) > 0.00000001)
+
+    @property
+    def behavior_subtype(self) -> str:
+        """Second-level behavior label for trading review."""
+        if self.archetype == "directional":
+            if self.latest_open_order_count > 0:
+                return "directional_with_passive_orders"
+            if self.active_position_count > 0:
+                return "directional_position_holder"
+            if self.snapshot_count <= 0:
+                return "directional_unenriched"
+            return "directional_flow_only"
+        if self.archetype == "mixed":
+            if self.latest_open_order_count >= 100 and self.active_position_count > 0:
+                return "mixed_inventory_mm"
+            if self.latest_open_order_count > 0:
+                return "mixed_quote_actor"
+            return "mixed_flow_inventory"
+        if self.archetype == "market_maker":
+            if self.active_position_count > 0:
+                return "market_maker_with_inventory"
+            return "pure_market_maker"
+        return "unknown"
+
+    @property
     def market_maker_score(self) -> float:
         """Ranks wallets with broad two-sided quoting and frequent order refreshes."""
         return (
@@ -121,6 +148,7 @@ class WalletActorSummary:
         return {
             "account": self.account,
             "archetype": self.archetype,
+            "behavior_subtype": self.behavior_subtype,
             "attention_score": self.attention_score,
             "market_maker_score": self.market_maker_score,
             "directional_score": self.directional_score,
@@ -141,6 +169,7 @@ class WalletActorSummary:
             "visible_liquidity_usd": self.visible_liquidity_usd,
             "two_sided_balance": self.two_sided_balance,
             "traded_coin_abs_position": self.traded_coin_abs_position,
+            "active_position_count": self.active_position_count,
             "feature_count": self.feature_count,
             "total_added_order_count": self.total_added_order_count,
             "total_removed_order_count": self.total_removed_order_count,
@@ -258,6 +287,7 @@ def format_actor_analysis(result: ActorAnalysisResult, *, top: int = 20, sort_by
 def format_actor_strategy_report(result: ActorAnalysisResult, *, top: int = 5) -> str:
     """Human-readable research report for trading review."""
     counts = Counter(w.archetype for w in result.wallets)
+    subtype_counts = Counter(w.behavior_subtype for w in result.wallets)
     lines = [
         f"Actor strategy report: {result.path}",
         (
@@ -269,14 +299,21 @@ def format_actor_strategy_report(result: ActorAnalysisResult, *, top: int = 5) -
             "archetypes="
             + ", ".join(f"{name}:{counts.get(name, 0)}" for name in ("market_maker", "mixed", "directional", "unknown"))
         ),
+        "behavior_groups=" + _format_counter(subtype_counts, 12),
         "",
         "Market Makers To Watch",
     ]
     lines.extend(_format_wallet_section(_top_wallets(result.wallets, "market_maker", "market-maker", top)))
     lines.extend(["", "Mixed Liquidity/Flow Actors"])
     lines.extend(_format_wallet_section(_top_wallets(result.wallets, "mixed", "attention", top)))
-    lines.extend(["", "Directional Wallets To Watch"])
-    lines.extend(_format_wallet_section(_top_wallets(result.wallets, "directional", "directional", top)))
+    lines.extend(["", "Directional Position Holders"])
+    lines.extend(_format_wallet_section(_top_wallets_by_subtype(result.wallets, "directional_position_holder", top)))
+    lines.extend(["", "Directional Flow Only"])
+    lines.extend(_format_wallet_section(_top_wallets_by_subtype(result.wallets, "directional_flow_only", top)))
+    lines.extend(["", "Directional With Passive Orders"])
+    lines.extend(_format_wallet_section(_top_wallets_by_subtype(result.wallets, "directional_with_passive_orders", top)))
+    lines.extend(["", "Directional Unenriched"])
+    lines.extend(_format_wallet_section(_top_wallets_by_subtype(result.wallets, "directional_unenriched", top)))
     lines.extend(["", "Trading Read"])
     lines.extend(_format_trading_read(result.wallets))
     return "\n".join(lines)
@@ -398,6 +435,11 @@ def _top_wallets(
     return _sorted_wallets(matching, sort_by)[:top]
 
 
+def _top_wallets_by_subtype(wallets: list[WalletActorSummary], subtype: str, top: int) -> list[WalletActorSummary]:
+    matching = [w for w in wallets if w.behavior_subtype == subtype]
+    return _sorted_wallets(matching, "directional")[:top]
+
+
 def _format_wallet_section(wallets: list[WalletActorSummary]) -> list[str]:
     if not wallets:
         return ["  none"]
@@ -409,6 +451,7 @@ def _format_wallet_section(wallets: list[WalletActorSummary]) -> list[str]:
             f"score={wallet.attention_score:.1f} "
             f"mm={wallet.market_maker_score:.1f} "
             f"dir={wallet.directional_score:.1f} "
+            f"group={wallet.behavior_subtype} "
             f"trades={wallet.trade_count} "
             f"notional={_fmt_usd(wallet.trade_notional_usd)}"
         )
@@ -450,7 +493,9 @@ def _format_trading_read(wallets: list[WalletActorSummary]) -> list[str]:
     mixed = _top_wallets(wallets, "mixed", "attention", 3)
     lines = [
         "- Treat market_maker wallets as liquidity-map inputs: watch bid/ask reloads, pulls, and imbalance changes.",
-        "- Treat directional wallets as flow/position inputs: watch whether their LIT exposure grows, flips, or unwinds.",
+        "- Treat directional_position_holder wallets as conviction inputs: watch whether exposure grows, flips, or unwinds.",
+        "- Treat directional_flow_only wallets as execution-flow inputs; they may not leave resting orders to follow.",
+        "- Treat directional_with_passive_orders as hybrid flow/passive-liquidity candidates worth deeper review.",
         "- Treat mixed wallets carefully: they may be market makers with inventory, not pure directional conviction.",
     ]
     if market_makers:
