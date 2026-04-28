@@ -282,6 +282,43 @@ def format_actor_strategy_report(result: ActorAnalysisResult, *, top: int = 5) -
     return "\n".join(lines)
 
 
+def format_actor_discovery_report(result: ActorAnalysisResult, *, top: int = 20) -> str:
+    """Trade-only report for broad wallet discovery runs."""
+    coin_counts: Counter[str] = Counter()
+    coin_notional: Counter[str] = Counter()
+    for wallet in result.wallets:
+        coin_counts.update(wallet.coins)
+        for coin, count in wallet.coins.items():
+            if wallet.trade_count:
+                coin_notional[coin] += wallet.trade_notional_usd * (count / wallet.trade_count)
+
+    lines = [
+        f"Actor discovery report: {result.path}",
+        (
+            f"records={result.line_count:,} invalid={result.invalid_line_count:,} "
+            f"large_trades={result.large_trade_count:,} wallets={len(result.wallets):,}"
+        ),
+        f"top_coins_by_wallet_participation={_format_counter(coin_counts, 10)}",
+        f"top_coins_by_est_notional={_format_usd_counter(coin_notional, 10)}",
+        "",
+        "Top Wallets By Trade Count",
+    ]
+    lines.extend(_format_discovery_wallet_section(_top_wallets_by(result.wallets, "trades", top)))
+    lines.extend(["", "Top Wallets By Notional"])
+    lines.extend(_format_discovery_wallet_section(_top_wallets_by(result.wallets, "notional", top)))
+    lines.extend(["", "Top Multi-Coin Wallets"])
+    lines.extend(_format_discovery_wallet_section(_top_wallets_by(result.wallets, "coin-breadth", top)))
+    lines.extend(["", "Next Step"])
+    lines.extend(
+        [
+            "- Export the highest-ranked wallets into a watchlist.",
+            "- Run targeted polling on that watchlist to learn positions and open orders.",
+            "- Keep the broad discovery stream running separately to find new actors.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def select_watchlist_wallets(
     result: ActorAnalysisResult,
     *,
@@ -307,6 +344,22 @@ def select_watchlist_wallets(
     return selected
 
 
+def select_discovery_watchlist_wallets(
+    result: ActorAnalysisResult,
+    *,
+    top_each: int = 50,
+) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for sort_by in ("trades", "notional", "coin-breadth"):
+        for wallet in _top_wallets_by(result.wallets, sort_by, top_each):
+            if wallet.account in seen:
+                continue
+            selected.append(wallet.account)
+            seen.add(wallet.account)
+    return selected
+
+
 def write_watchlist(path: str | Path, wallets: list[str]) -> None:
     path_obj = Path(path)
     path_obj.parent.mkdir(parents=True, exist_ok=True)
@@ -323,6 +376,16 @@ def _sorted_wallets(wallets: list[WalletActorSummary], sort_by: str) -> list[Wal
     else:
         key = lambda s: s.attention_score
     return sorted(wallets, key=key, reverse=True)
+
+
+def _top_wallets_by(wallets: list[WalletActorSummary], sort_by: str, top: int) -> list[WalletActorSummary]:
+    if sort_by == "notional":
+        key = lambda s: s.trade_notional_usd
+    elif sort_by == "coin-breadth":
+        key = lambda s: (len(s.coins), s.trade_notional_usd, s.trade_count)
+    else:
+        key = lambda s: (s.trade_count, s.trade_notional_usd)
+    return sorted(wallets, key=key, reverse=True)[:top]
 
 
 def _top_wallets(
@@ -359,6 +422,25 @@ def _format_wallet_section(wallets: list[WalletActorSummary]) -> list[str]:
             f"balance={wallet.two_sided_balance:.2f}"
         )
         lines.append(f"     positions={_format_positions(wallet.latest_positions)}")
+    return lines
+
+
+def _format_discovery_wallet_section(wallets: list[WalletActorSummary]) -> list[str]:
+    if not wallets:
+        return ["  none"]
+    lines: list[str] = []
+    for idx, wallet in enumerate(wallets, start=1):
+        lines.append(
+            "  "
+            f"{idx}. {_short_wallet(wallet.account)} "
+            f"trades={wallet.trade_count:,} "
+            f"notional={_fmt_usd(wallet.trade_notional_usd)} "
+            f"coins={len(wallet.coins)} "
+            f"top_coins={_format_counter(wallet.coins, 5)}"
+        )
+        if wallet.counterparties:
+            top_counterparties = ", ".join(f"{_short_wallet(a)}:{n}" for a, n in wallet.counterparties.most_common(3))
+            lines.append(f"     counterparties={top_counterparties}")
     return lines
 
 
@@ -399,6 +481,18 @@ def _fmt_usd(value: float) -> str:
     if abs_v >= 1_000:
         return f"{sign}${abs_v / 1_000:.1f}K"
     return f"{sign}${abs_v:.0f}"
+
+
+def _format_counter(counter: Counter[str], top: int) -> str:
+    if not counter:
+        return "-"
+    return ", ".join(f"{k}:{v:,}" for k, v in counter.most_common(top))
+
+
+def _format_usd_counter(counter: Counter[str], top: int) -> str:
+    if not counter:
+        return "-"
+    return ", ".join(f"{k}:{_fmt_usd(v)}" for k, v in counter.most_common(top))
 
 
 def _summary_for(summaries: dict[str, WalletActorSummary], account: str) -> WalletActorSummary:

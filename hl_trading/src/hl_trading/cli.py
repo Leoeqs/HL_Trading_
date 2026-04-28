@@ -22,7 +22,9 @@ from hl_trading.runtime.engine import run_default_engine
 from hl_trading.services.actor_analysis import (
     analyze_actor_ndjson,
     format_actor_analysis,
+    format_actor_discovery_report,
     format_actor_strategy_report,
+    select_discovery_watchlist_wallets,
     select_watchlist_wallets,
     write_watchlist,
 )
@@ -97,7 +99,14 @@ def main() -> None:
         help="Ranking score to use for text output",
     )
     p_aa.add_argument("--report", action="store_true", help="Emit compact trading-oriented sections")
+    p_aa.add_argument("--discovery-report", action="store_true", help="Emit trade-only all-perps discovery report")
     p_aa.add_argument("--export-watchlist", type=Path, default=None, help="Write selected wallet addresses to this file")
+    p_aa.add_argument(
+        "--export-discovery-watchlist",
+        type=Path,
+        default=None,
+        help="Write top trade-discovery wallets to this file",
+    )
     p_aa.add_argument(
         "--watchlist-archetypes",
         default="market_maker,mixed,directional",
@@ -191,9 +200,16 @@ def _cmd_analyze_actors(args: argparse.Namespace) -> None:
         wallets = select_watchlist_wallets(result, top_per_archetype=args.top, archetypes=archetypes)
         write_watchlist(args.export_watchlist, wallets)
         print(f"wrote {len(wallets)} wallet(s) to {args.export_watchlist}", file=sys.stderr)
+    if args.export_discovery_watchlist is not None:
+        wallets = select_discovery_watchlist_wallets(result, top_each=args.top)
+        write_watchlist(args.export_discovery_watchlist, wallets)
+        print(f"wrote {len(wallets)} wallet(s) to {args.export_discovery_watchlist}", file=sys.stderr)
     if args.json:
         json.dump(result.to_record(top=args.top), sys.stdout, indent=2)
         sys.stdout.write("\n")
+        return
+    if args.discovery_report:
+        print(format_actor_discovery_report(result, top=args.top))
         return
     if args.report:
         print(format_actor_strategy_report(result, top=args.top))
