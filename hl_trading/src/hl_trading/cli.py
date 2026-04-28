@@ -30,6 +30,7 @@ from hl_trading.services.actor_analysis import (
 )
 from hl_trading.services.actor_watch import LargeTradeActorWatcher
 from hl_trading.services.portfolio import fetch_portfolio_view
+from hl_trading.services.wallet_signals import build_wallet_signal_report, format_wallet_signal_report
 from hl_trading.strategies.loader import load_strategy
 
 
@@ -114,6 +115,15 @@ def main() -> None:
     )
     p_aa.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     p_aa.set_defaults(fn=_cmd_analyze_actors)
+
+    p_sig = sub.add_parser("wallet-signals", help="Research directional wallet position signals")
+    p_sig.add_argument("ndjson", type=Path, help="Path to targeted actor-watch NDJSON")
+    p_sig.add_argument("--coins", default="LIT,HYPE,SOL", help="Comma-separated coins to score")
+    p_sig.add_argument("--lookback-min", type=float, default=120.0, help="Recent window for signal aggregation")
+    p_sig.add_argument("--min-delta-notional", type=float, default=1_000.0, help="Minimum position delta notional")
+    p_sig.add_argument("--top-events", type=int, default=8, help="Events to show per coin")
+    p_sig.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+    p_sig.set_defaults(fn=_cmd_wallet_signals)
 
     args = parser.parse_args()
     args.fn(args)
@@ -215,6 +225,21 @@ def _cmd_analyze_actors(args: argparse.Namespace) -> None:
         print(format_actor_strategy_report(result, top=args.top))
         return
     print(format_actor_analysis(result, top=args.top, sort_by=args.sort_by))
+
+
+def _cmd_wallet_signals(args: argparse.Namespace) -> None:
+    coins = [x.strip() for x in args.coins.split(",") if x.strip()]
+    report = build_wallet_signal_report(
+        args.ndjson,
+        target_coins=coins,
+        lookback_minutes=args.lookback_min,
+        min_delta_notional=args.min_delta_notional,
+    )
+    if args.json:
+        json.dump(report.to_record(), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+    print(format_wallet_signal_report(report, top_events=args.top_events))
 
 
 def _read_wallet_file(path: Path) -> list[str]:
