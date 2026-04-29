@@ -29,6 +29,7 @@ from hl_trading.services.actor_analysis import (
     write_watchlist,
 )
 from hl_trading.services.actor_watch import LargeTradeActorWatcher
+from hl_trading.services.live_wallet_signals import LiveWalletSignalDaemon
 from hl_trading.services.portfolio import fetch_portfolio_view
 from hl_trading.services.wallet_signals import build_wallet_signal_report, format_wallet_signal_report
 from hl_trading.strategies.loader import load_strategy
@@ -124,6 +125,23 @@ def main() -> None:
     p_sig.add_argument("--top-events", type=int, default=8, help="Events to show per coin")
     p_sig.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     p_sig.set_defaults(fn=_cmd_wallet_signals)
+
+    p_live_sig = sub.add_parser("live-wallet-signals", help="Continuously score directional wallet signals")
+    p_live_sig.add_argument("--coins", default="LIT,HYPE,SOL", help="Comma-separated coins to score")
+    p_live_sig.add_argument("--track-wallet", action="append", default=[], help="Wallet to poll; repeatable")
+    p_live_sig.add_argument("--track-wallet-file", type=Path, default=None, help="Wallet file, one address per line")
+    p_live_sig.add_argument("--network", choices=["mainnet", "testnet"], default=None, help="Defaults to HL_NETWORK or registry")
+    p_live_sig.add_argument("--poll-sec", type=float, default=120.0, help="Wallet polling interval")
+    p_live_sig.add_argument("--lookback-min", type=float, default=120.0, help="Signal event window")
+    p_live_sig.add_argument("--min-delta-notional", type=float, default=1_000.0, help="Minimum wallet position delta")
+    p_live_sig.add_argument("--min-follow-notional", type=float, default=100_000.0, help="Minimum dominant follow notional")
+    p_live_sig.add_argument("--min-follow-wallets", type=int, default=2, help="Minimum wallets on dominant side")
+    p_live_sig.add_argument("--min-imbalance", type=float, default=0.75, help="Minimum follow-side imbalance")
+    p_live_sig.add_argument("--max-opposite-ratio", type=float, default=0.35, help="Maximum opposite/follow ratio")
+    p_live_sig.add_argument("--max-fade-ratio", type=float, default=0.50, help="Maximum adverse-fade/follow ratio")
+    p_live_sig.add_argument("--output", default=None, help="Append live events/decisions to NDJSON")
+    p_live_sig.add_argument("--duration-sec", type=float, default=None, help="Optional finite run duration")
+    p_live_sig.set_defaults(fn=_cmd_live_wallet_signals)
 
     args = parser.parse_args()
     args.fn(args)
@@ -240,6 +258,34 @@ def _cmd_wallet_signals(args: argparse.Namespace) -> None:
         sys.stdout.write("\n")
         return
     print(format_wallet_signal_report(report, top_events=args.top_events))
+
+
+def _cmd_live_wallet_signals(args: argparse.Namespace) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    network = args.network or os.getenv("HL_NETWORK") or registry.DEFAULT_HL_NETWORK
+    base_url = constants.MAINNET_API_URL if network == "mainnet" else constants.TESTNET_API_URL
+    wallets = list(args.track_wallet)
+    if args.track_wallet_file is not None:
+        wallets.extend(_read_wallet_file(args.track_wallet_file))
+    info = Info(base_url, skip_ws=False)
+    daemon = LiveWalletSignalDaemon(
+        info,
+        coins=[x.strip() for x in args.coins.split(",") if x.strip()],
+        wallets=wallets,
+        poll_interval_s=args.poll_sec,
+        lookback_minutes=args.lookback_min,
+        min_delta_notional=args.min_delta_notional,
+        min_follow_notional=args.min_follow_notional,
+        min_follow_wallets=args.min_follow_wallets,
+        min_imbalance=args.min_imbalance,
+        max_opposite_ratio=args.max_opposite_ratio,
+        max_adverse_fade_ratio=args.max_fade_ratio,
+        output_path=args.output,
+    )
+    try:
+        daemon.run(duration_s=args.duration_sec)
+    finally:
+        info.disconnect_websocket()
 
 
 def _read_wallet_file(path: Path) -> list[str]:
