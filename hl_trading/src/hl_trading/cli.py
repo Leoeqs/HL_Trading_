@@ -151,6 +151,7 @@ def main() -> None:
 
     p_live_analysis = sub.add_parser("analyze-live-signals", help="Summarize live wallet signal NDJSON")
     p_live_analysis.add_argument("ndjson", type=Path, help="Path to live-wallet-signals NDJSON")
+    p_live_analysis.add_argument("--coins", default="", help="Comma-separated coins to include; default all")
     p_live_analysis.add_argument("--top-wallets", type=int, default=15, help="Number of active wallets to show")
     p_live_analysis.add_argument("--top-entries", type=int, default=15, help="Number of trade entries to show")
     p_live_analysis.add_argument(
@@ -158,6 +159,8 @@ def main() -> None:
         default="5,15,30,60",
         help="Comma-separated forward-return horizons in minutes",
     )
+    p_live_analysis.add_argument("--calibration-horizon-min", type=float, default=15.0, help="Wallet/pattern edge horizon")
+    p_live_analysis.add_argument("--min-calibration-events", type=int, default=5, help="Minimum evaluated events per edge")
     p_live_analysis.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     p_live_analysis.set_defaults(fn=_cmd_analyze_live_signals)
 
@@ -312,10 +315,14 @@ def _cmd_live_wallet_signals(args: argparse.Namespace) -> None:
 
 
 def _cmd_analyze_live_signals(args: argparse.Namespace) -> None:
+    coins = tuple(x.strip().upper() for x in args.coins.split(",") if x.strip())
     horizons = tuple(float(x.strip()) for x in args.horizons_min.split(",") if x.strip())
     analysis = analyze_live_signal_ndjson(
         args.ndjson,
+        target_coins=coins,
         horizons_minutes=horizons,
+        calibration_horizon_minutes=args.calibration_horizon_min,
+        min_calibration_events=args.min_calibration_events,
         top_wallets=args.top_wallets,
     )
     if args.json:

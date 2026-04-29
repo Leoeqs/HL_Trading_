@@ -264,8 +264,130 @@ class HorizonPerformance:
 
 
 @dataclass(frozen=True, slots=True)
+class ActionableEvent:
+    account: str
+    coin: str
+    observed_at_ms: int
+    kind: str
+    tactic: str
+    side: str
+    entry_px: float
+    notional: float
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "account": self.account,
+            "coin": self.coin,
+            "observed_at_ms": self.observed_at_ms,
+            "kind": self.kind,
+            "tactic": self.tactic,
+            "side": self.side,
+            "entry_px": self.entry_px,
+            "notional": self.notional,
+        }
+
+
+@dataclass(slots=True)
+class CalibrationBucket:
+    key_type: str
+    key: str
+    label: str
+    event_count: int = 0
+    evaluated_count: int = 0
+    missing_count: int = 0
+    win_count: int = 0
+    loss_count: int = 0
+    total_notional: float = 0.0
+    returns_bps: list[float] = field(default_factory=list)
+    coins: Counter[str] = field(default_factory=Counter)
+    tactics: Counter[str] = field(default_factory=Counter)
+    sides: Counter[str] = field(default_factory=Counter)
+    kinds: Counter[str] = field(default_factory=Counter)
+
+    def observe(self, event: ActionableEvent, return_bps: float | None) -> None:
+        self.event_count += 1
+        self.total_notional += event.notional
+        self.coins[event.coin] += 1
+        self.tactics[event.tactic] += 1
+        self.sides[event.side] += 1
+        self.kinds[event.kind] += 1
+        if return_bps is None:
+            self.missing_count += 1
+            return
+        self.evaluated_count += 1
+        self.returns_bps.append(return_bps)
+        if return_bps > 0:
+            self.win_count += 1
+        elif return_bps < 0:
+            self.loss_count += 1
+
+    @property
+    def win_rate(self) -> float | None:
+        if self.evaluated_count <= 0:
+            return None
+        return self.win_count / self.evaluated_count
+
+    @property
+    def avg_return_bps(self) -> float | None:
+        if not self.returns_bps:
+            return None
+        return sum(self.returns_bps) / len(self.returns_bps)
+
+    @property
+    def median_return_bps(self) -> float | None:
+        if not self.returns_bps:
+            return None
+        return median(self.returns_bps)
+
+    @property
+    def best_return_bps(self) -> float | None:
+        if not self.returns_bps:
+            return None
+        return max(self.returns_bps)
+
+    @property
+    def worst_return_bps(self) -> float | None:
+        if not self.returns_bps:
+            return None
+        return min(self.returns_bps)
+
+    @property
+    def weighted_edge_bps(self) -> float | None:
+        avg = self.avg_return_bps
+        if avg is None:
+            return None
+        # Penalize tiny samples so a one-off lucky wallet is not ranked as durable edge.
+        confidence_weight = min(1.0, self.evaluated_count / 20)
+        return avg * confidence_weight
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "key_type": self.key_type,
+            "key": self.key,
+            "label": self.label,
+            "event_count": self.event_count,
+            "evaluated_count": self.evaluated_count,
+            "missing_count": self.missing_count,
+            "win_count": self.win_count,
+            "loss_count": self.loss_count,
+            "win_rate": self.win_rate,
+            "total_notional": self.total_notional,
+            "avg_return_bps": self.avg_return_bps,
+            "median_return_bps": self.median_return_bps,
+            "best_return_bps": self.best_return_bps,
+            "worst_return_bps": self.worst_return_bps,
+            "weighted_edge_bps": self.weighted_edge_bps,
+            "coins": dict(self.coins),
+            "tactics": dict(self.tactics),
+            "sides": dict(self.sides),
+            "kinds": dict(self.kinds),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class LiveSignalAnalysis:
     path: str
+    target_coins: tuple[str, ...]
     record_count: int
     invalid_record_count: int
     baseline_wallet_count: int
@@ -284,10 +406,15 @@ class LiveSignalAnalysis:
     performance: tuple[HorizonPerformance, ...]
     price_observation_counts: dict[str, int]
     decision_price_coverage: float
+    calibration_horizon_minutes: float
+    min_calibration_events: int
+    wallet_calibration: tuple[CalibrationBucket, ...]
+    pattern_calibration: tuple[CalibrationBucket, ...]
 
     def to_record(self, *, top_wallets: int = 20, top_entries: int = 20) -> dict[str, Any]:
         return {
             "path": self.path,
+            "target_coins": list(self.target_coins),
             "record_count": self.record_count,
             "invalid_record_count": self.invalid_record_count,
             "baseline_wallet_count": self.baseline_wallet_count,
@@ -306,16 +433,25 @@ class LiveSignalAnalysis:
             "top_wallets": [w.to_record() for w in self.top_wallets[:top_wallets]],
             "trade_entries": [e.to_record() for e in self.trade_entries[:top_entries]],
             "performance": [p.to_record() for p in self.performance],
+            "calibration_horizon_minutes": self.calibration_horizon_minutes,
+            "min_calibration_events": self.min_calibration_events,
+            "wallet_calibration": [b.to_record() for b in self.wallet_calibration],
+            "pattern_calibration": [b.to_record() for b in self.pattern_calibration],
         }
 
 
 def analyze_live_signal_ndjson(
     path: str | Path,
     *,
+    target_coins: tuple[str, ...] = (),
     horizons_minutes: tuple[float, ...] = (5.0, 15.0, 30.0, 60.0),
+    calibration_horizon_minutes: float = 15.0,
+    min_calibration_events: int = 5,
     top_wallets: int = 20,
 ) -> LiveSignalAnalysis:
     path_obj = Path(path)
+    coin_filter = {coin.strip().upper() for coin in target_coins if coin.strip()}
+    targets = tuple(sorted(coin_filter))
     record_count = 0
     invalid_record_count = 0
     baseline_wallets: set[str] = set()
@@ -334,6 +470,10 @@ def analyze_live_signal_ndjson(
     latest_px: dict[str, float] = {}
     last_decision_key: dict[str, tuple[str, str | None, str]] = {}
     trade_entries: list[TradeEntry] = []
+    actionable_events: list[ActionableEvent] = []
+
+    def include_coin(coin: str) -> bool:
+        return not coin_filter or coin.upper() in coin_filter
 
     def coin_stats(coin: str) -> CoinLiveStats:
         coin = coin.upper()
@@ -370,15 +510,29 @@ def analyze_live_signal_ndjson(
                 continue
 
             if typ == "live_wallet_position_event":
-                position_event_count += 1
                 coin = str(record.get("coin", "")).upper()
+                if not coin or not include_coin(coin):
+                    continue
+                position_event_count += 1
                 account = str(record.get("account", "")).lower()
                 px = _as_float(record.get("approx_px"))
+                notional = _as_float(record.get("approx_delta_notional"))
+                kind = str(record.get("kind", "unknown"))
                 if coin:
                     coin_stats(coin).observe_event(record)
                     if ts > 0 and px > 0:
                         price_points[coin].append((ts, px))
                         latest_px[coin] = px
+                        follow_side = record.get("follow_side")
+                        fade_side = record.get("fade_side")
+                        if account and follow_side in {"long", "short"}:
+                            actionable_events.append(
+                                ActionableEvent(account, coin, ts, kind, "follow", str(follow_side), px, notional)
+                            )
+                        if account and fade_side in {"long", "short"}:
+                            actionable_events.append(
+                                ActionableEvent(account, coin, ts, kind, "fade", str(fade_side), px, notional)
+                            )
                 if account:
                     stats = wallets.get(account)
                     if stats is None:
@@ -388,8 +542,10 @@ def analyze_live_signal_ndjson(
                 continue
 
             if typ == "live_wallet_signal_decision":
-                decision_count += 1
                 coin = str(record.get("coin", "")).upper()
+                if not coin or not include_coin(coin):
+                    continue
+                decision_count += 1
                 action = str(record.get("action", "UNKNOWN"))
                 side = record.get("side")
                 reason = str(record.get("reason", "unknown"))
@@ -407,8 +563,6 @@ def analyze_live_signal_ndjson(
                     watch_decision_count += 1
                 elif action == "SKIP":
                     skip_decision_count += 1
-                if not coin:
-                    continue
                 key = (action, str(side) if side else None, reason)
                 previous_key = last_decision_key.get(coin)
                 is_transition = previous_key != key
@@ -440,10 +594,17 @@ def analyze_live_signal_ndjson(
         sorted(wallets.values(), key=lambda w: (w.total_notional, w.event_count), reverse=True)[:top_wallets]
     )
     performance = _evaluate_trade_entries(trade_entries, price_points, horizons_minutes)
+    wallet_calibration, pattern_calibration = _calibrate_actionable_events(
+        actionable_events,
+        price_points,
+        horizon_minutes=calibration_horizon_minutes,
+        min_events=min_calibration_events,
+    )
     price_observation_counts = {coin: len(points) for coin, points in sorted(price_points.items())}
     decision_price_coverage = decisions_with_px / decision_count if decision_count else 0.0
     return LiveSignalAnalysis(
         path=str(path_obj),
+        target_coins=targets,
         record_count=record_count,
         invalid_record_count=invalid_record_count,
         baseline_wallet_count=len(baseline_wallets),
@@ -462,6 +623,10 @@ def analyze_live_signal_ndjson(
         performance=performance,
         price_observation_counts=price_observation_counts,
         decision_price_coverage=decision_price_coverage,
+        calibration_horizon_minutes=calibration_horizon_minutes,
+        min_calibration_events=min_calibration_events,
+        wallet_calibration=wallet_calibration,
+        pattern_calibration=pattern_calibration,
     )
 
 
@@ -472,10 +637,11 @@ def format_live_signal_analysis(
     top_entries: int = 15,
 ) -> str:
     span = _format_span(analysis.first_observed_at_ms, analysis.latest_observed_at_ms)
+    targets = ",".join(analysis.target_coins) if analysis.target_coins else "ALL"
     lines = [
         f"Live signal analysis: {analysis.path}",
         (
-            f"records={analysis.record_count:,} invalid={analysis.invalid_record_count:,} "
+            f"targets={targets} records={analysis.record_count:,} invalid={analysis.invalid_record_count:,} "
             f"wallets={analysis.baseline_wallet_count:,} span={span}"
         ),
         (
@@ -563,10 +729,51 @@ def format_live_signal_analysis(
     lines.extend(
         [
             "",
+            (
+                f"Wallet Edge Calibration ({analysis.calibration_horizon_minutes:g}m forward, "
+                f"min {analysis.min_calibration_events} evaluated events)"
+            ),
+        ]
+    )
+    positive_wallets = [b for b in analysis.wallet_calibration if (b.weighted_edge_bps or 0) > 0]
+    negative_wallets = [b for b in reversed(analysis.wallet_calibration) if (b.weighted_edge_bps or 0) < 0]
+    lines.append("Best follow/fade wallets:")
+    if positive_wallets:
+        for bucket in positive_wallets[: min(top_wallets, 10)]:
+            lines.append(f"- {_format_bucket(bucket)}")
+    else:
+        lines.append("- none with positive weighted edge yet")
+    lines.append("Worst follow/fade wallets:")
+    if negative_wallets:
+        for bucket in negative_wallets[: min(top_wallets, 10)]:
+            lines.append(f"- {_format_bucket(bucket)}")
+    else:
+        lines.append("- none with negative weighted edge yet")
+
+    lines.extend(["", "Event Pattern Calibration"])
+    positive_patterns = [b for b in analysis.pattern_calibration if (b.weighted_edge_bps or 0) > 0]
+    negative_patterns = [b for b in reversed(analysis.pattern_calibration) if (b.weighted_edge_bps or 0) < 0]
+    lines.append("Best patterns:")
+    if positive_patterns:
+        for bucket in positive_patterns[:10]:
+            lines.append(f"- {_format_bucket(bucket)}")
+    else:
+        lines.append("- none with positive weighted edge yet")
+    lines.append("Worst patterns:")
+    if negative_patterns:
+        for bucket in negative_patterns[:10]:
+            lines.append(f"- {_format_bucket(bucket)}")
+    else:
+        lines.append("- none with negative weighted edge yet")
+
+    lines.extend(
+        [
+            "",
             "Interpretation",
             "- Use latest coin state for current directional pressure, not as automatic execution.",
             "- Use distinct trade entries instead of raw TRADE counts; raw decisions repeat every polling cycle.",
             "- If adverse fade or opposite pressure is large, the signal is internally conflicted even when direction is clear.",
+            "- Promote wallets/patterns with durable positive edge; fade or exclude persistent negative-edge wallets.",
         ]
     )
     return "\n".join(lines)
@@ -626,6 +833,57 @@ def _evaluate_trade_entries(
     return tuple(results)
 
 
+def _calibrate_actionable_events(
+    events: list[ActionableEvent],
+    price_points: dict[str, list[tuple[int, float]]],
+    *,
+    horizon_minutes: float,
+    min_events: int,
+) -> tuple[tuple[CalibrationBucket, ...], tuple[CalibrationBucket, ...]]:
+    horizon_ms = int(horizon_minutes * 60_000)
+    wallet_buckets: dict[str, CalibrationBucket] = {}
+    pattern_buckets: dict[str, CalibrationBucket] = {}
+    for event in events:
+        exit_px = _price_at_or_after(price_points.get(event.coin, []), event.observed_at_ms + horizon_ms)
+        return_bps: float | None = None
+        if exit_px is not None and event.entry_px > 0:
+            direction = 1.0 if event.side == "long" else -1.0
+            return_bps = ((exit_px - event.entry_px) / event.entry_px) * 10_000 * direction
+
+        wallet_bucket = wallet_buckets.get(event.account)
+        if wallet_bucket is None:
+            wallet_bucket = CalibrationBucket("wallet", event.account, _short_wallet(event.account))
+            wallet_buckets[event.account] = wallet_bucket
+        wallet_bucket.observe(event, return_bps)
+
+        pattern_key = f"{event.coin}:{event.tactic}:{event.kind}:{event.side}"
+        pattern_bucket = pattern_buckets.get(pattern_key)
+        if pattern_bucket is None:
+            pattern_bucket = CalibrationBucket("pattern", pattern_key, pattern_key)
+            pattern_buckets[pattern_key] = pattern_bucket
+        pattern_bucket.observe(event, return_bps)
+
+    def bucket_sort_key(bucket: CalibrationBucket) -> tuple[float, int, float]:
+        edge = bucket.weighted_edge_bps
+        return (edge if edge is not None else -1_000_000.0, bucket.evaluated_count, bucket.total_notional)
+
+    wallet_results = tuple(
+        sorted(
+            (bucket for bucket in wallet_buckets.values() if bucket.evaluated_count >= min_events),
+            key=bucket_sort_key,
+            reverse=True,
+        )
+    )
+    pattern_results = tuple(
+        sorted(
+            (bucket for bucket in pattern_buckets.values() if bucket.evaluated_count >= min_events),
+            key=bucket_sort_key,
+            reverse=True,
+        )
+    )
+    return wallet_results, pattern_results
+
+
 def _price_at_or_after(points: list[tuple[int, float]], ts: int) -> float | None:
     if not points:
         return None
@@ -637,6 +895,21 @@ def _price_at_or_after(points: list[tuple[int, float]], ts: int) -> float | None
 
 def _format_counter(counter: Counter[str], *, limit: int) -> str:
     return ", ".join(f"{key}={value:,}" for key, value in counter.most_common(limit))
+
+
+def _format_bucket(bucket: CalibrationBucket) -> str:
+    edge = _fmt_bps(bucket.weighted_edge_bps)
+    avg = _fmt_bps(bucket.avg_return_bps)
+    med = _fmt_bps(bucket.median_return_bps)
+    win_rate = _fmt_pct(bucket.win_rate)
+    coins = _format_counter(bucket.coins, limit=3) or "-"
+    tactics = _format_counter(bucket.tactics, limit=2) or "-"
+    kinds = _format_counter(bucket.kinds, limit=3) or "-"
+    return (
+        f"{bucket.label} edge={edge} avg={avg} median={med} win_rate={win_rate} "
+        f"eval={bucket.evaluated_count:,}/{bucket.event_count:,} notional={_fmt_usd(bucket.total_notional)} "
+        f"coins={coins} tactics={tactics} kinds={kinds}"
+    )
 
 
 def _format_span(first_ms: int, latest_ms: int) -> str:
@@ -656,3 +929,9 @@ def _fmt_bps(value: float | None) -> str:
     if value is None:
         return "-"
     return f"{value:+.1f}bps"
+
+
+def _fmt_pct(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.0%}"
