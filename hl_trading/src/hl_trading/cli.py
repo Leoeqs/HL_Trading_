@@ -29,6 +29,7 @@ from hl_trading.services.actor_analysis import (
     write_watchlist,
 )
 from hl_trading.services.actor_watch import LargeTradeActorWatcher
+from hl_trading.services.holder_analysis import analyze_holder_ndjson, format_holder_analysis
 from hl_trading.services.live_signal_analysis import analyze_live_signal_ndjson, format_live_signal_analysis
 from hl_trading.services.live_wallet_signals import LiveWalletSignalDaemon
 from hl_trading.services.portfolio import fetch_portfolio_view
@@ -163,6 +164,19 @@ def main() -> None:
     p_live_analysis.add_argument("--min-calibration-events", type=int, default=5, help="Minimum evaluated events per edge")
     p_live_analysis.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     p_live_analysis.set_defaults(fn=_cmd_analyze_live_signals)
+
+    p_holders = sub.add_parser("analyze-holders", help="Analyze current long/short holders from wallet snapshots")
+    p_holders.add_argument("ndjson", type=Path, help="Path to actor-watch NDJSON with wallet snapshots")
+    p_holders.add_argument("--coins", default="LIT,HYPE", help="Comma-separated coins to include")
+    p_holders.add_argument("--top", type=int, default=25, help="Number of holders/movers to show")
+    p_holders.add_argument(
+        "--min-abs-notional",
+        type=float,
+        default=0.0,
+        help="Minimum absolute position notional to include",
+    )
+    p_holders.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+    p_holders.set_defaults(fn=_cmd_analyze_holders)
 
     args = parser.parse_args()
     args.fn(args)
@@ -330,6 +344,20 @@ def _cmd_analyze_live_signals(args: argparse.Namespace) -> None:
         sys.stdout.write("\n")
         return
     print(format_live_signal_analysis(analysis, top_wallets=args.top_wallets, top_entries=args.top_entries))
+
+
+def _cmd_analyze_holders(args: argparse.Namespace) -> None:
+    coins = tuple(x.strip().upper() for x in args.coins.split(",") if x.strip())
+    result = analyze_holder_ndjson(
+        args.ndjson,
+        target_coins=coins,
+        min_abs_notional_usd=args.min_abs_notional,
+    )
+    if args.json:
+        json.dump(result.to_record(top=args.top), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+    print(format_holder_analysis(result, top=args.top))
 
 
 def _read_wallet_file(path: Path) -> list[str]:
