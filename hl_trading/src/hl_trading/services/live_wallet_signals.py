@@ -203,7 +203,9 @@ class LiveWalletSignalDaemon:
 
         for signal in signals.values():
             decision = self._decision_for(signal)
-            writer.write(decision.to_record(record_type="live_wallet_signal_decision"))
+            record = decision.to_record(record_type="live_wallet_signal_decision")
+            record["approx_px"] = self._last_px.get(signal.coin.upper())
+            writer.write(record)
             key = (decision.action, decision.side, decision.reason)
             if self._last_decisions.get(signal.coin) != key:
                 self._last_decisions[signal.coin] = key

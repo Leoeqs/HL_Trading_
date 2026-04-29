@@ -29,6 +29,7 @@ from hl_trading.services.actor_analysis import (
     write_watchlist,
 )
 from hl_trading.services.actor_watch import LargeTradeActorWatcher
+from hl_trading.services.live_signal_analysis import analyze_live_signal_ndjson, format_live_signal_analysis
 from hl_trading.services.live_wallet_signals import LiveWalletSignalDaemon
 from hl_trading.services.portfolio import fetch_portfolio_view
 from hl_trading.services.wallet_signals import build_wallet_signal_report, format_wallet_signal_report
@@ -147,6 +148,18 @@ def main() -> None:
     p_live_sig.add_argument("--output", default=None, help="Append live events/decisions to NDJSON")
     p_live_sig.add_argument("--duration-sec", type=float, default=None, help="Optional finite run duration")
     p_live_sig.set_defaults(fn=_cmd_live_wallet_signals)
+
+    p_live_analysis = sub.add_parser("analyze-live-signals", help="Summarize live wallet signal NDJSON")
+    p_live_analysis.add_argument("ndjson", type=Path, help="Path to live-wallet-signals NDJSON")
+    p_live_analysis.add_argument("--top-wallets", type=int, default=15, help="Number of active wallets to show")
+    p_live_analysis.add_argument("--top-entries", type=int, default=15, help="Number of trade entries to show")
+    p_live_analysis.add_argument(
+        "--horizons-min",
+        default="5,15,30,60",
+        help="Comma-separated forward-return horizons in minutes",
+    )
+    p_live_analysis.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+    p_live_analysis.set_defaults(fn=_cmd_analyze_live_signals)
 
     args = parser.parse_args()
     args.fn(args)
@@ -296,6 +309,20 @@ def _cmd_live_wallet_signals(args: argparse.Namespace) -> None:
         daemon.run(duration_s=args.duration_sec)
     finally:
         info.disconnect_websocket()
+
+
+def _cmd_analyze_live_signals(args: argparse.Namespace) -> None:
+    horizons = tuple(float(x.strip()) for x in args.horizons_min.split(",") if x.strip())
+    analysis = analyze_live_signal_ndjson(
+        args.ndjson,
+        horizons_minutes=horizons,
+        top_wallets=args.top_wallets,
+    )
+    if args.json:
+        json.dump(analysis.to_record(top_wallets=args.top_wallets, top_entries=args.top_entries), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+    print(format_live_signal_analysis(analysis, top_wallets=args.top_wallets, top_entries=args.top_entries))
 
 
 def _read_wallet_file(path: Path) -> list[str]:
