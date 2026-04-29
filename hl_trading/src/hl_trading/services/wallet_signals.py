@@ -11,6 +11,8 @@ from typing import Any, Literal
 from hl_trading.services.actor_analysis import analyze_actor_ndjson
 
 SignalSide = Literal["long", "short"]
+DecisionAction = Literal["TRADE", "WATCH", "SKIP"]
+DecisionSide = Literal["long", "short"]
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -86,6 +88,37 @@ class CoinSignal:
 
 
 @dataclass(frozen=True, slots=True)
+class SignalDecision:
+    observed_at_ms: int
+    coin: str
+    action: DecisionAction
+    side: DecisionSide | None
+    reason: str
+    follow_notional: float
+    opposite_notional: float
+    adverse_fade_notional: float
+    follow_wallet_count: int
+    imbalance: float
+    recent_event_count: int
+
+    def to_record(self, *, record_type: str = "wallet_signal_decision") -> dict[str, Any]:
+        return {
+            "type": record_type,
+            "observed_at_ms": self.observed_at_ms,
+            "coin": self.coin,
+            "action": self.action,
+            "side": self.side,
+            "reason": self.reason,
+            "follow_notional": self.follow_notional,
+            "opposite_notional": self.opposite_notional,
+            "adverse_fade_notional": self.adverse_fade_notional,
+            "follow_wallet_count": self.follow_wallet_count,
+            "imbalance": self.imbalance,
+            "recent_event_count": self.recent_event_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class WalletSignalReport:
     path: str
     target_coins: tuple[str, ...]
@@ -93,8 +126,14 @@ class WalletSignalReport:
     event_count: int
     lookback_minutes: float
     min_delta_notional: float
+    min_follow_notional: float
+    min_follow_wallets: int
+    min_imbalance: float
+    max_opposite_ratio: float
+    max_adverse_fade_ratio: float
     latest_observed_at_ms: int
     signals: tuple[CoinSignal, ...]
+    decisions: tuple[SignalDecision, ...]
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -104,8 +143,14 @@ class WalletSignalReport:
             "event_count": self.event_count,
             "lookback_minutes": self.lookback_minutes,
             "min_delta_notional": self.min_delta_notional,
+            "min_follow_notional": self.min_follow_notional,
+            "min_follow_wallets": self.min_follow_wallets,
+            "min_imbalance": self.min_imbalance,
+            "max_opposite_ratio": self.max_opposite_ratio,
+            "max_adverse_fade_ratio": self.max_adverse_fade_ratio,
             "latest_observed_at_ms": self.latest_observed_at_ms,
             "signals": [s.to_record() for s in self.signals],
+            "decisions": [d.to_record() for d in self.decisions],
         }
 
 
@@ -115,6 +160,11 @@ def build_wallet_signal_report(
     target_coins: list[str],
     lookback_minutes: float = 120.0,
     min_delta_notional: float = 1_000.0,
+    min_follow_notional: float = 100_000.0,
+    min_follow_wallets: int = 2,
+    min_imbalance: float = 0.75,
+    max_opposite_ratio: float = 0.35,
+    max_adverse_fade_ratio: float = 0.50,
 ) -> WalletSignalReport:
     path_obj = Path(path)
     targets = tuple(c.strip().upper() for c in target_coins if c.strip())
@@ -190,21 +240,21 @@ def build_wallet_signal_report(
     signals_by_coin = {coin: CoinSignal(coin=coin) for coin in targets}
     for event in recent_events:
         signal = signals_by_coin[event.coin]
-        signal.events.append(event)
-        if event.follow_side == "long":
-            signal.follow_long_notional += event.approx_delta_notional
-            signal.follow_long_wallets.add(event.account)
-        elif event.follow_side == "short":
-            signal.follow_short_notional += event.approx_delta_notional
-            signal.follow_short_wallets.add(event.account)
-        if event.fade_side == "long":
-            signal.fade_long_notional += event.approx_delta_notional
-            signal.fade_long_wallets.add(event.account)
-        elif event.fade_side == "short":
-            signal.fade_short_notional += event.approx_delta_notional
-            signal.fade_short_wallets.add(event.account)
+        add_position_event_to_signal(signal, event)
 
     signals = tuple(sorted(signals_by_coin.values(), key=lambda s: len(s.events), reverse=True))
+    decisions = tuple(
+        decide_coin_signal(
+            signal,
+            observed_at_ms=latest_observed_at_ms,
+            min_follow_notional=min_follow_notional,
+            min_follow_wallets=min_follow_wallets,
+            min_imbalance=min_imbalance,
+            max_opposite_ratio=max_opposite_ratio,
+            max_adverse_fade_ratio=max_adverse_fade_ratio,
+        )
+        for signal in signals
+    )
     return WalletSignalReport(
         path=str(path_obj),
         target_coins=targets,
@@ -212,8 +262,14 @@ def build_wallet_signal_report(
         event_count=len(events),
         lookback_minutes=lookback_minutes,
         min_delta_notional=min_delta_notional,
+        min_follow_notional=min_follow_notional,
+        min_follow_wallets=min_follow_wallets,
+        min_imbalance=min_imbalance,
+        max_opposite_ratio=max_opposite_ratio,
+        max_adverse_fade_ratio=max_adverse_fade_ratio,
         latest_observed_at_ms=latest_observed_at_ms,
         signals=signals,
+        decisions=decisions,
     )
 
 
@@ -223,14 +279,19 @@ def format_wallet_signal_report(report: WalletSignalReport, *, top_events: int =
         (
             f"targets={','.join(report.target_coins)} directional_wallets={report.directional_wallet_count:,} "
             f"events={report.event_count:,} lookback_min={report.lookback_minutes:g} "
-            f"min_delta_notional={_fmt_usd(report.min_delta_notional)}"
+            f"min_delta_notional={_fmt_usd(report.min_delta_notional)} "
+            f"trade_threshold={_fmt_usd(report.min_follow_notional)}/{report.min_follow_wallets}w"
         ),
         "",
         "Coin Signals",
     ]
+    decisions_by_coin = {decision.coin: decision for decision in report.decisions}
     for signal in report.signals:
+        decision = decisions_by_coin.get(signal.coin)
+        action = f"{decision.action} {decision.side or '-'}" if decision else "SKIP -"
+        reason = decision.reason if decision else "no_decision"
         lines.append(
-            f"- {signal.coin}: follow={signal.best_follow_side or '-'} "
+            f"- {signal.coin}: decision={action} reason={reason} follow={signal.best_follow_side or '-'} "
             f"imbalance={signal.follow_imbalance:.2f} "
             f"follow_long={_fmt_usd(signal.follow_long_notional)} ({len(signal.follow_long_wallets)}w) "
             f"follow_short={_fmt_usd(signal.follow_short_notional)} ({len(signal.follow_short_wallets)}w) "
@@ -256,6 +317,94 @@ def format_wallet_signal_report(report: WalletSignalReport, *, top_events: int =
         ]
     )
     return "\n".join(lines)
+
+
+def add_position_event_to_signal(signal: CoinSignal, event: PositionEvent) -> None:
+    signal.events.append(event)
+    if event.follow_side == "long":
+        signal.follow_long_notional += event.approx_delta_notional
+        signal.follow_long_wallets.add(event.account)
+    elif event.follow_side == "short":
+        signal.follow_short_notional += event.approx_delta_notional
+        signal.follow_short_wallets.add(event.account)
+    if event.fade_side == "long":
+        signal.fade_long_notional += event.approx_delta_notional
+        signal.fade_long_wallets.add(event.account)
+    elif event.fade_side == "short":
+        signal.fade_short_notional += event.approx_delta_notional
+        signal.fade_short_wallets.add(event.account)
+
+
+def decide_coin_signal(
+    signal: CoinSignal,
+    *,
+    observed_at_ms: int,
+    min_follow_notional: float = 100_000.0,
+    min_follow_wallets: int = 2,
+    min_imbalance: float = 0.75,
+    max_opposite_ratio: float = 0.35,
+    max_adverse_fade_ratio: float = 0.50,
+) -> SignalDecision:
+    side = signal.best_follow_side
+    if side is None:
+        return SignalDecision(
+            observed_at_ms,
+            signal.coin,
+            "SKIP",
+            None,
+            "no_follow_events",
+            0,
+            0,
+            0,
+            0,
+            0,
+            len(signal.events),
+        )
+    if side == "long":
+        follow = signal.follow_long_notional
+        opposite = signal.follow_short_notional
+        adverse_fade = signal.fade_short_notional
+        wallets = len(signal.follow_long_wallets)
+    else:
+        follow = signal.follow_short_notional
+        opposite = signal.follow_long_notional
+        adverse_fade = signal.fade_long_notional
+        wallets = len(signal.follow_short_wallets)
+
+    reasons: list[str] = []
+    if follow < min_follow_notional:
+        reasons.append("follow_notional_low")
+    if wallets < min_follow_wallets:
+        reasons.append("wallet_count_low")
+    if signal.follow_imbalance < min_imbalance:
+        reasons.append("imbalance_low")
+    if follow > 0 and opposite / follow > max_opposite_ratio:
+        reasons.append("opposite_too_high")
+    if follow > 0 and adverse_fade / follow > max_adverse_fade_ratio:
+        reasons.append("adverse_fade_too_high")
+
+    if not reasons:
+        action: DecisionAction = "TRADE"
+        reason = "thresholds_passed"
+    elif follow >= min_follow_notional * 0.5 and wallets >= 1:
+        action = "WATCH"
+        reason = ",".join(reasons)
+    else:
+        action = "SKIP"
+        reason = ",".join(reasons)
+    return SignalDecision(
+        observed_at_ms=observed_at_ms,
+        coin=signal.coin,
+        action=action,
+        side=side,
+        reason=reason,
+        follow_notional=follow,
+        opposite_notional=opposite,
+        adverse_fade_notional=adverse_fade,
+        follow_wallet_count=wallets,
+        imbalance=signal.follow_imbalance,
+        recent_event_count=len(signal.events),
+    )
 
 
 def _position_event(

@@ -122,6 +122,11 @@ def main() -> None:
     p_sig.add_argument("--coins", default="LIT,HYPE,SOL", help="Comma-separated coins to score")
     p_sig.add_argument("--lookback-min", type=float, default=120.0, help="Recent window for signal aggregation")
     p_sig.add_argument("--min-delta-notional", type=float, default=1_000.0, help="Minimum position delta notional")
+    p_sig.add_argument("--min-follow-notional", type=float, default=100_000.0, help="Minimum dominant follow notional")
+    p_sig.add_argument("--min-follow-wallets", type=int, default=2, help="Minimum wallets on dominant side")
+    p_sig.add_argument("--min-imbalance", type=float, default=0.75, help="Minimum follow-side imbalance")
+    p_sig.add_argument("--max-opposite-ratio", type=float, default=0.35, help="Maximum opposite/follow ratio")
+    p_sig.add_argument("--max-fade-ratio", type=float, default=0.50, help="Maximum adverse-fade/follow ratio")
     p_sig.add_argument("--top-events", type=int, default=8, help="Events to show per coin")
     p_sig.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     p_sig.set_defaults(fn=_cmd_wallet_signals)
@@ -252,6 +257,11 @@ def _cmd_wallet_signals(args: argparse.Namespace) -> None:
         target_coins=coins,
         lookback_minutes=args.lookback_min,
         min_delta_notional=args.min_delta_notional,
+        min_follow_notional=args.min_follow_notional,
+        min_follow_wallets=args.min_follow_wallets,
+        min_imbalance=args.min_imbalance,
+        max_opposite_ratio=args.max_opposite_ratio,
+        max_adverse_fade_ratio=args.max_fade_ratio,
     )
     if args.json:
         json.dump(report.to_record(), sys.stdout, indent=2)

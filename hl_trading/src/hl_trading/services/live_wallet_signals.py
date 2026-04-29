@@ -12,20 +12,27 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from hyperliquid.info import Info
 
 from hl_trading.services.actor_watch import fetch_wallet_snapshot
 from hl_trading.services.market_data import MarketDataService
-from hl_trading.services.wallet_signals import CoinSignal, PositionEvent, _fmt_usd, _position_event, _short_wallet
+from hl_trading.services.wallet_signals import (
+    CoinSignal,
+    DecisionAction,
+    DecisionSide,
+    PositionEvent,
+    SignalDecision,
+    _fmt_usd,
+    _position_event,
+    _short_wallet,
+    add_position_event_to_signal,
+    decide_coin_signal,
+)
 
 logger = logging.getLogger(__name__)
-
-DecisionAction = Literal["TRADE", "WATCH", "SKIP"]
-DecisionSide = Literal["long", "short"]
 
 
 def _now_ms() -> int:
@@ -37,37 +44,6 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-@dataclass(frozen=True, slots=True)
-class LiveDecision:
-    observed_at_ms: int
-    coin: str
-    action: DecisionAction
-    side: DecisionSide | None
-    reason: str
-    follow_notional: float
-    opposite_notional: float
-    adverse_fade_notional: float
-    follow_wallet_count: int
-    imbalance: float
-    recent_event_count: int
-
-    def to_record(self) -> dict[str, Any]:
-        return {
-            "type": "live_wallet_signal_decision",
-            "observed_at_ms": self.observed_at_ms,
-            "coin": self.coin,
-            "action": self.action,
-            "side": self.side,
-            "reason": self.reason,
-            "follow_notional": self.follow_notional,
-            "opposite_notional": self.opposite_notional,
-            "adverse_fade_notional": self.adverse_fade_notional,
-            "follow_wallet_count": self.follow_wallet_count,
-            "imbalance": self.imbalance,
-            "recent_event_count": self.recent_event_count,
-        }
 
 
 class LiveWalletSignalDaemon:
@@ -223,23 +199,11 @@ class LiveWalletSignalDaemon:
             signal = signals.get(event.coin.upper())
             if signal is None:
                 continue
-            signal.events.append(event)
-            if event.follow_side == "long":
-                signal.follow_long_notional += event.approx_delta_notional
-                signal.follow_long_wallets.add(event.account)
-            elif event.follow_side == "short":
-                signal.follow_short_notional += event.approx_delta_notional
-                signal.follow_short_wallets.add(event.account)
-            if event.fade_side == "long":
-                signal.fade_long_notional += event.approx_delta_notional
-                signal.fade_long_wallets.add(event.account)
-            elif event.fade_side == "short":
-                signal.fade_short_notional += event.approx_delta_notional
-                signal.fade_short_wallets.add(event.account)
+            add_position_event_to_signal(signal, event)
 
         for signal in signals.values():
             decision = self._decision_for(signal)
-            writer.write(decision.to_record())
+            writer.write(decision.to_record(record_type="live_wallet_signal_decision"))
             key = (decision.action, decision.side, decision.reason)
             if self._last_decisions.get(signal.coin) != key:
                 self._last_decisions[signal.coin] = key
@@ -257,54 +221,15 @@ class LiveWalletSignalDaemon:
                     decision.recent_event_count,
                 )
 
-    def _decision_for(self, signal: CoinSignal) -> LiveDecision:
-        side = signal.best_follow_side
-        if side is None:
-            return LiveDecision(_now_ms(), signal.coin, "SKIP", None, "no_follow_events", 0, 0, 0, 0, 0, len(signal.events))
-        if side == "long":
-            follow = signal.follow_long_notional
-            opposite = signal.follow_short_notional
-            adverse_fade = signal.fade_short_notional
-            wallets = len(signal.follow_long_wallets)
-        else:
-            follow = signal.follow_short_notional
-            opposite = signal.follow_long_notional
-            adverse_fade = signal.fade_long_notional
-            wallets = len(signal.follow_short_wallets)
-
-        reasons: list[str] = []
-        if follow < self._min_follow_notional:
-            reasons.append("follow_notional_low")
-        if wallets < self._min_follow_wallets:
-            reasons.append("wallet_count_low")
-        if signal.follow_imbalance < self._min_imbalance:
-            reasons.append("imbalance_low")
-        if follow > 0 and opposite / follow > self._max_opposite_ratio:
-            reasons.append("opposite_too_high")
-        if follow > 0 and adverse_fade / follow > self._max_adverse_fade_ratio:
-            reasons.append("adverse_fade_too_high")
-
-        if not reasons:
-            action: DecisionAction = "TRADE"
-            reason = "thresholds_passed"
-        elif follow >= self._min_follow_notional * 0.5 and wallets >= 1:
-            action = "WATCH"
-            reason = ",".join(reasons)
-        else:
-            action = "SKIP"
-            reason = ",".join(reasons)
-        return LiveDecision(
+    def _decision_for(self, signal: CoinSignal) -> SignalDecision:
+        return decide_coin_signal(
+            signal,
             observed_at_ms=_now_ms(),
-            coin=signal.coin,
-            action=action,
-            side=side,
-            reason=reason,
-            follow_notional=follow,
-            opposite_notional=opposite,
-            adverse_fade_notional=adverse_fade,
-            follow_wallet_count=wallets,
-            imbalance=signal.follow_imbalance,
-            recent_event_count=len(signal.events),
+            min_follow_notional=self._min_follow_notional,
+            min_follow_wallets=self._min_follow_wallets,
+            min_imbalance=self._min_imbalance,
+            max_opposite_ratio=self._max_opposite_ratio,
+            max_adverse_fade_ratio=self._max_adverse_fade_ratio,
         )
 
 
