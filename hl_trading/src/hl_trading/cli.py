@@ -32,6 +32,11 @@ from hl_trading.services.actor_watch import LargeTradeActorWatcher
 from hl_trading.services.holder_analysis import analyze_holder_ndjson, format_holder_analysis
 from hl_trading.services.live_signal_analysis import analyze_live_signal_ndjson, format_live_signal_analysis
 from hl_trading.services.live_wallet_signals import LiveWalletSignalDaemon
+from hl_trading.services.participant_watchlist import (
+    build_participant_watchlist,
+    format_participant_watchlist,
+    write_participant_watchlist,
+)
 from hl_trading.services.portfolio import fetch_portfolio_view
 from hl_trading.services.wallet_signals import build_wallet_signal_report, format_wallet_signal_report
 from hl_trading.strategies.loader import load_strategy
@@ -177,6 +182,24 @@ def main() -> None:
     )
     p_holders.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     p_holders.set_defaults(fn=_cmd_analyze_holders)
+
+    p_participants = sub.add_parser("build-participant-watchlist", help="Build focused watchlist from trade discovery")
+    p_participants.add_argument("ndjson", type=Path, help="Path to trade discovery NDJSON")
+    p_participants.add_argument("--coins", default="LIT,HYPE", help="Comma-separated coins to include")
+    p_participants.add_argument(
+        "--seed-wallet-file",
+        action="append",
+        default=[],
+        type=Path,
+        help="Existing wallet file to merge; repeatable",
+    )
+    p_participants.add_argument("--max-wallets", type=int, default=250, help="Maximum wallets to export")
+    p_participants.add_argument("--min-trades", type=int, default=1, help="Minimum discovery trades for non-seed wallets")
+    p_participants.add_argument("--min-notional", type=float, default=0.0, help="Minimum discovery notional for non-seed wallets")
+    p_participants.add_argument("--top", type=int, default=50, help="Number of participants to show")
+    p_participants.add_argument("--output", type=Path, default=None, help="Write selected wallet addresses to this file")
+    p_participants.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+    p_participants.set_defaults(fn=_cmd_build_participant_watchlist)
 
     args = parser.parse_args()
     args.fn(args)
@@ -358,6 +381,26 @@ def _cmd_analyze_holders(args: argparse.Namespace) -> None:
         sys.stdout.write("\n")
         return
     print(format_holder_analysis(result, top=args.top))
+
+
+def _cmd_build_participant_watchlist(args: argparse.Namespace) -> None:
+    coins = tuple(x.strip().upper() for x in args.coins.split(",") if x.strip())
+    result = build_participant_watchlist(
+        args.ndjson,
+        target_coins=coins,
+        seed_wallet_files=tuple(args.seed_wallet_file),
+        max_wallets=args.max_wallets,
+        min_trades=args.min_trades,
+        min_notional_usd=args.min_notional,
+    )
+    if args.output is not None:
+        write_participant_watchlist(args.output, result.selected_wallets)
+        print(f"wrote {len(result.selected_wallets)} wallet(s) to {args.output}", file=sys.stderr)
+    if args.json:
+        json.dump(result.to_record(top=args.top), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+    print(format_participant_watchlist(result, top=args.top))
 
 
 def _read_wallet_file(path: Path) -> list[str]:
